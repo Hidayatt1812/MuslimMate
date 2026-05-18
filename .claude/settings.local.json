@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls d:/Coding/app-mobile/MuslimMate/app/\\\\\\(tabs\\\\\\)/)",
+      "Bash(ls /d/Coding/app-mobile/MuslimMate/app/\\\\\\(tabs\\\\\\))",
+      "Bash(npm install:*)",
+      "Bash(npm show:*)",
+      "Bash(npx tsc:*)"
+    ]
+  }
+}

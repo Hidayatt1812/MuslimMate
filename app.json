@@ -1,0 +1,78 @@
+{
+  "expo": {
+    "name": "MuslimMate",
+    "slug": "MuslimMate",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/logo/logo.png",
+    "scheme": "muslimmate",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "MuslimMate menggunakan lokasi untuk menghitung waktu sholat dan arah kiblat.",
+        "UIBackgroundModes": [
+          "audio",
+          "fetch"
+        ]
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#063B34",
+        "foregroundImage": "./assets/logo/logo-transparent.png"
+      },
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "RECEIVE_BOOT_COMPLETED",
+        "VIBRATE",
+        "RECORD_AUDIO"
+      ]
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/logo/logo.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/logo/logo-transparent.png",
+          "imageWidth": 220,
+          "resizeMode": "contain",
+          "backgroundColor": "#063B34",
+          "dark": {
+            "backgroundColor": "#063B34"
+          }
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "MuslimMate menggunakan lokasi untuk menghitung waktu sholat dan arah kiblat yang akurat."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/logo/logo-transparent.png",
+          "color": "#063B34"
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "MuslimMate membutuhkan akses mikrofon untuk fitur latihan hafalan."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}
