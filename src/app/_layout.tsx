@@ -1,15 +1,19 @@
 import 'react-native-url-polyfill/auto'; // Diperlukan oleh Supabase di React Native
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { Stack } from 'expo-router';
+import { router, Stack, usePathname } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { View } from 'react-native';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { Colors } from '@/constants/theme';
 import QuranMiniPlayer from '@/components/quran/QuranMiniPlayer';
 import { useLanguageStore } from '@/stores/languageStore';
+import { isOnboardingDone } from '@/services/storageService';
+
+void SplashScreen.preventAutoHideAsync().catch(() => {});
 
 export const unstable_settings = {
   anchor: '(tabs)',
@@ -18,15 +22,62 @@ export const unstable_settings = {
 export default function RootLayout() {
   const colorScheme = useColorScheme();
   const C = Colors[colorScheme === 'dark' ? 'dark' : 'light'];
+  const pathname = usePathname();
+  const [bootReady, setBootReady] = useState(false);
+  const [onboardingDone, setOnboardingDoneState] = useState<boolean | null>(null);
 
   useEffect(() => {
-    useLanguageStore.getState().init();
+    let cancelled = false;
+    (async () => {
+      await useLanguageStore.getState().init();
+      const done = await isOnboardingDone();
+      if (cancelled) return;
+      setOnboardingDoneState(done);
+      setBootReady(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  useEffect(() => {
+    if (!bootReady || onboardingDone === null) return;
+    let cancelled = false;
+    (async () => {
+      const storedDone = await isOnboardingDone();
+      if (cancelled) return;
+      if (storedDone !== onboardingDone) {
+        setOnboardingDoneState(storedDone);
+        return;
+      }
+
+      const onOnboarding = pathname === '/onboarding';
+      if (!storedDone && !onOnboarding) {
+        router.replace('/onboarding');
+      }
+      if (storedDone && onOnboarding) {
+        router.replace('/(tabs)');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [bootReady, onboardingDone, pathname]);
+
+  useEffect(() => {
+    if (!bootReady || onboardingDone === null) return;
+    const onOnboarding = pathname === '/onboarding';
+    const routeReady = (!onboardingDone && onOnboarding) || (onboardingDone && !onOnboarding);
+    if (routeReady) {
+      void SplashScreen.hideAsync().catch(() => {});
+    }
+  }, [bootReady, onboardingDone, pathname]);
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <View style={{ flex: 1, backgroundColor: C.background }}>
         <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.background } }}>
+          <Stack.Screen name="onboarding" options={{ headerShown: false, animation: 'fade' }} />
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
           <Stack.Screen
             name="quran/[surahId]"
@@ -50,7 +101,7 @@ export default function RootLayout() {
           <Stack.Screen name="login" options={{ headerShown: false, animation: 'slide_from_bottom' }} />
           <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
         </Stack>
-        <QuranMiniPlayer />
+        {pathname !== '/onboarding' && <QuranMiniPlayer />}
       </View>
       <StatusBar style="light" />
     </ThemeProvider>

@@ -18,19 +18,24 @@ import {
   exchangeQFCode,
   saveQFTokens,
   clearQFSession,
-  isQFLoggedIn,
+  isQFProxyConfigured,
+  getQFSessionStatus,
 } from '@/services/quranFoundationAuthService';
 
 WebBrowser.maybeCompleteAuthSession();
 
-const REDIRECT_URI = AuthSession.makeRedirectUri({ scheme: 'muslimmate', path: 'oauth' });
+const REDIRECT_URI =
+  process.env.EXPO_PUBLIC_QF_REDIRECT_URI ??
+  AuthSession.makeRedirectUri({ scheme: 'muslimmate', path: 'oauth' });
 
 export default function LoginScreen() {
   const scheme = useColorScheme() ?? 'dark';
   const C = Colors[scheme];
+  const configured = isQFProxyConfigured();
   const [loading, setLoading] = useState(false);
   const [loggedIn, setLoggedIn] = useState(false);
   const [checking, setChecking] = useState(true);
+  const [sessionScope, setSessionScope] = useState<string | undefined>();
 
   const [request, response, promptAsync] = AuthSession.useAuthRequest(
     {
@@ -43,8 +48,9 @@ export default function LoginScreen() {
   );
 
   useEffect(() => {
-    isQFLoggedIn().then(v => {
-      setLoggedIn(v);
+    getQFSessionStatus().then(status => {
+      setLoggedIn(status.loggedIn);
+      setSessionScope(status.scope);
       setChecking(false);
     });
   }, []);
@@ -62,6 +68,7 @@ export default function LoginScreen() {
     try {
       const tokens = await exchangeQFCode(code, codeVerifier, REDIRECT_URI);
       await saveQFTokens(tokens);
+      setSessionScope(tokens.scope);
       setLoggedIn(true);
       Alert.alert('Berhasil', 'Akun Quran.com kamu sudah terhubung!', [
         { text: 'OK', onPress: () => router.back() },
@@ -82,6 +89,7 @@ export default function LoginScreen() {
         onPress: async () => {
           await clearQFSession();
           setLoggedIn(false);
+          setSessionScope(undefined);
         },
       },
     ]);
@@ -118,7 +126,7 @@ export default function LoginScreen() {
           </View>
           <Text style={[styles.appName, { color: C.text }]}>Hubungkan Akun</Text>
           <Text style={[styles.subtitle, { color: C.textSecondary }]}>
-            Sinkronisasi dengan Quran.Foundation
+            Sinkronisasi aman melalui Quran Foundation API
           </Text>
         </View>
 
@@ -129,6 +137,17 @@ export default function LoginScreen() {
               <Ionicons name="checkmark-circle" size={20} color="#10B981" />
               <Text style={styles.connectedText}>Terhubung dengan Quran.com</Text>
             </View>
+            <Text style={[styles.syncNote, { color: C.textSecondary }]}>
+              Bookmark dan sesi baca dikirim melalui backend proxy MuslimMate. Secret API tetap berada di server.
+            </Text>
+            {sessionScope ? (
+              <View style={[styles.scopePill, { borderColor: C.border, backgroundColor: C.card }]}>
+                <Ionicons name="shield-checkmark-outline" size={14} color="#10B981" />
+                <Text style={{ color: C.textMuted, fontSize: FontSize.xs, flex: 1 }} numberOfLines={2}>
+                  Scope aktif: {sessionScope}
+                </Text>
+              </View>
+            ) : null}
 
             <View style={[styles.featureList, { backgroundColor: C.card, borderColor: C.border }]}>
               {FEATURES.map((f, i) => (
@@ -150,6 +169,14 @@ export default function LoginScreen() {
         ) : (
           /* ── Belum login ── */
           <View style={styles.section}>
+            {!configured && (
+              <View style={[styles.configWarning, { backgroundColor: '#F59E0B14', borderColor: '#F59E0B45' }]}>
+                <Ionicons name="warning-outline" size={18} color="#F59E0B" />
+                <Text style={{ color: C.textSecondary, fontSize: FontSize.xs, flex: 1, lineHeight: 18 }}>
+                  Proxy Quran Foundation belum dikonfigurasi. Isi EXPO_PUBLIC_QF_CLIENT_ID dan EXPO_PUBLIC_QF_PROXY_BASE_URL untuk mengaktifkan login.
+                </Text>
+              </View>
+            )}
             <View style={[styles.featureList, { backgroundColor: C.card, borderColor: C.border }]}>
               <Text style={[styles.featureTitle, { color: C.textMuted }]}>KEUNTUNGAN TERHUBUNG</Text>
               {FEATURES.map((f, i) => (
@@ -161,9 +188,9 @@ export default function LoginScreen() {
             </View>
 
             <TouchableOpacity
-              style={[styles.loginBtn, (!request || loading) && styles.disabled]}
+              style={[styles.loginBtn, (!configured || !request || loading) && styles.disabled]}
               onPress={() => promptAsync()}
-              disabled={!request || loading}
+              disabled={!configured || !request || loading}
               activeOpacity={0.85}
             >
               {loading ? (
@@ -177,9 +204,16 @@ export default function LoginScreen() {
             </TouchableOpacity>
 
             <Text style={[styles.note, { color: C.textMuted }]}>
-              Menggunakan OAuth 2.0 dari Quran.Foundation.{'\n'}
-              Redirect URI: {REDIRECT_URI}
+              Menggunakan OAuth 2.0 + PKCE dari Quran.Foundation.{'\n'}
+              Token exchange dan User API diproses lewat backend proxy.
             </Text>
+
+            <View style={[styles.redirectBox, { backgroundColor: C.card, borderColor: C.border }]}>
+              <Text style={[styles.redirectLabel, { color: C.textMuted }]}>REDIRECT URI AKTIF</Text>
+              <Text selectable style={[styles.redirectValue, { color: C.text }]}>
+                {REDIRECT_URI}
+              </Text>
+            </View>
           </View>
         )}
       </ScrollView>
@@ -190,7 +224,7 @@ export default function LoginScreen() {
 const FEATURES = [
   { icon: 'bookmark' as const, label: 'Sinkronisasi bookmark ayat lintas perangkat' },
   { icon: 'time-outline' as const, label: 'Rekam sesi tilawah & progres membaca' },
-  { icon: 'cloud-done-outline' as const, label: 'Data tersimpan aman di Quran.Foundation' },
+  { icon: 'shield-checkmark-outline' as const, label: 'QF client secret tersimpan di backend proxy' },
   { icon: 'phone-portrait-outline' as const, label: 'Akses dari quran.com dan app lainnya' },
 ];
 
@@ -221,6 +255,24 @@ const styles = StyleSheet.create({
     padding: Spacing.md,
   },
   connectedText: { color: '#10B981', fontWeight: '700', fontSize: FontSize.sm },
+  syncNote: { fontSize: FontSize.xs, lineHeight: 18 },
+  scopePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 8,
+  },
+  configWarning: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.sm,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    padding: Spacing.md,
+  },
   featureList: {
     borderRadius: BorderRadius.lg, borderWidth: 1, overflow: 'hidden',
   },
@@ -247,4 +299,12 @@ const styles = StyleSheet.create({
   },
   logoutText: { fontSize: FontSize.sm },
   note: { fontSize: FontSize.xs, textAlign: 'center', lineHeight: 18 },
+  redirectBox: {
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    padding: Spacing.md,
+    gap: 6,
+  },
+  redirectLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 0 },
+  redirectValue: { fontSize: FontSize.xs, lineHeight: 18 },
 });

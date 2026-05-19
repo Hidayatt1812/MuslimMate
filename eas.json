@@ -1,0 +1,24 @@
+{
+  "cli": {
+    "version": ">= 16.0.0"
+  },
+  "build": {
+    "preview": {
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_QF_CLIENT_ID": "a778c6db-4556-4a34-83ff-a02c4a495730",
+        "EXPO_PUBLIC_QF_PROXY_BASE_URL": "https://cixfmdyhthwylevocncp.supabase.co/functions/v1/qf-proxy",
+        "EXPO_PUBLIC_QF_OAUTH_BASE": "https://prelive-oauth2.quran.foundation",
+        "EXPO_PUBLIC_QF_REDIRECT_URI": "muslimmate://oauth"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production": {
+      "android": {
+        "buildType": "app-bundle"
+      }
+    }
+  }
+}

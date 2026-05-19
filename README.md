@@ -241,9 +241,12 @@ An AI-powered Islamic Q&A assistant.
 | [Aladhan API](https://aladhan.com/prayer-times-api) | Prayer times worldwide |
 | [Al-Quran Cloud API](https://alquran.cloud/api) | Quran text, translations, multiple scripts |
 | [EveryAyah CDN](https://everyayah.com) | Quranic audio from multiple reciters |
+| [Quran Foundation APIs](https://api-docs.quran.foundation) | Secure Quran content, tafsir, audio metadata, search, Quran.com OAuth, bookmarks, and reading sessions via backend proxy |
 | OpenAI-compatible API | AI Islamic chat assistant |
 | Device GPS | Prayer times & Qibla calculation |
 | Device Compass | Qibla direction needle |
+
+Hackathon API details and setup notes are documented in [docs/quran-foundation-api-usage.md](docs/quran-foundation-api-usage.md).
 
 ---
 
@@ -521,9 +524,12 @@ Asisten tanya jawab Islami berbasis kecerdasan buatan.
 | [Aladhan API](https://aladhan.com/prayer-times-api) | Waktu sholat di seluruh dunia |
 | [Al-Quran Cloud API](https://alquran.cloud/api) | Teks Quran, terjemahan, berbagai script |
 | [EveryAyah CDN](https://everyayah.com) | Audio Quran dari berbagai qari |
+| [Quran Foundation APIs](https://api-docs.quran.foundation) | Konten Quran, tafsir, metadata audio, pencarian, OAuth Quran.com, bookmark, dan sesi baca melalui backend proxy |
 | API kompatibel OpenAI | Asisten obrolan AI Islami |
 | GPS Perangkat | Perhitungan waktu sholat & kiblat |
 | Kompas Perangkat | Jarum kompas kiblat |
+
+Detail penggunaan API untuk hackathon tersedia di [docs/quran-foundation-api-usage.md](docs/quran-foundation-api-usage.md).
 
 ---
 

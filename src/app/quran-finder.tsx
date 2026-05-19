@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity,
   StyleSheet, ActivityIndicator, ScrollView,
+  TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -10,7 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { Colors, Spacing, BorderRadius, FontSize } from '@/constants/theme';
 import { Card } from '@/components/ui/Card';
-import { fetchQFVersesByKeys } from '@/services/quranFoundationService';
+import { fetchQFSearch, fetchQFVersesByKeys, type QFVerseResult } from '@/services/quranFoundationService';
 import { useTranslation } from '@/hooks/useTranslation';
 import type { Lang } from '@/constants/i18n';
 
@@ -85,7 +86,8 @@ const MOODS = [
 
 type Mood = typeof MOODS[number];
 type MoodId = Mood['id'];
-type QFVerse = { verseKey: string; arabic: string; translation: string };
+type QFVerse = QFVerseResult;
+type SearchMode = 'quick' | 'advanced';
 
 const MOOD_TEXT: Record<MoodId, Record<Lang, { label: string; desc: string }>> = {
   grateful: {
@@ -130,11 +132,75 @@ export default function QuranFinderScreen() {
   const { t, lang } = useTranslation();
   const [selected, setSelected] = useState<Mood | null>(null);
   const [verses, setVerses] = useState<QFVerse[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchTitle, setSearchTitle] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const searchRequestRef = useRef(0);
+  const activeModeRef = useRef<'mood' | 'search' | null>(null);
+  const searchCopy = lang === 'en'
+    ? {
+        placeholder: 'Search a Quran topic, e.g. mercy, patience, anxiety',
+        action: 'Search',
+        searching: 'Searching Quran Foundation Search API...',
+        result: 'Search results',
+        empty: 'No ayahs matched this search. Try a related word or a verse reference.',
+      }
+    : {
+        placeholder: "Cari tema Al-Qur'an, misal sabar, rezeki, cemas",
+        action: 'Cari',
+        searching: 'Mencari lewat Quran Foundation Search API...',
+        result: 'Hasil pencarian',
+        empty: 'Belum ada ayat yang cocok. Coba kata lain atau tulis referensi ayat.',
+      };
+
+  const executeSearch = useCallback(async (rawQuery: string, mode: SearchMode = 'quick') => {
+    const query = rawQuery.trim();
+    if (!query) return;
+
+    const requestId = searchRequestRef.current + 1;
+    searchRequestRef.current = requestId;
+    activeModeRef.current = 'search';
+    setSelected(null);
+    setSearchTitle(query);
+    setVerses([]);
+    setError('');
+    setLoading(true);
+
+    try {
+      const searchResults = await fetchQFSearch(query, lang, mode);
+      const keys = Array.from(new Set(searchResults.map(item => item.verseKey))).slice(0, 8);
+      const hydrated = await fetchQFVersesByKeys(keys, lang);
+      if (requestId !== searchRequestRef.current) return;
+
+      const searchByKey = new Map(searchResults.map(item => [item.verseKey, item]));
+      const hydratedByKey = new Map(hydrated.map(item => [item.verseKey, item]));
+      const merged = keys
+        .map(key => {
+          const fallback = searchByKey.get(key);
+          return hydratedByKey.get(key) ?? {
+            verseKey: key,
+            arabic: fallback?.arabic ?? '',
+            translation: fallback?.title ?? '',
+          };
+        })
+        .filter(item => item.arabic || item.translation);
+
+      setVerses(merged);
+    } catch {
+      if (requestId === searchRequestRef.current) setError(lang === 'en'
+        ? 'Search could not load results right now. Please try again in a moment.'
+        : 'Pencarian belum bisa memuat hasil. Coba lagi beberapa saat.');
+    } finally {
+      if (requestId === searchRequestRef.current) setLoading(false);
+    }
+  }, [lang]);
 
   const selectMood = async (mood: Mood) => {
+    searchRequestRef.current += 1;
+    activeModeRef.current = 'mood';
     setSelected(mood);
+    setSearchTitle('');
     setVerses([]);
     setError('');
     setLoading(true);
@@ -148,9 +214,38 @@ export default function QuranFinderScreen() {
     }
   };
 
+  const runSearch = async () => {
+    await executeSearch(searchQuery, 'advanced');
+  };
+
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (query.length < 2) {
+      searchRequestRef.current += 1;
+      if (activeModeRef.current === 'search') {
+        setSearchTitle('');
+        setVerses([]);
+        setError('');
+        setLoading(false);
+      }
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      void executeSearch(query, 'quick');
+    }, 650);
+    return () => clearTimeout(timer);
+  }, [executeSearch, searchQuery]);
+
   const openSurah = (verseKey: string) => {
-    const [surahId] = verseKey.split(':');
-    router.push(`/quran/${surahId}` as any);
+    const [surahId, ayahNumber] = verseKey.split(':');
+    router.push({
+      pathname: '/quran/[surahId]',
+      params: {
+        surahId,
+        startAyah: String(Math.max(1, Number(ayahNumber) || 1)),
+      },
+    } as any);
   };
 
   return (
@@ -170,6 +265,29 @@ export default function QuranFinderScreen() {
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 32 }}>
+        <View style={styles.searchArea}>
+          <View style={[styles.searchBox, { backgroundColor: C.card, borderColor: C.border }]}>
+            <Ionicons name="search-outline" size={18} color={C.textMuted} />
+            <TextInput
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              onSubmitEditing={runSearch}
+              placeholder={searchCopy.placeholder}
+              placeholderTextColor={C.textMuted}
+              returnKeyType="search"
+              style={[styles.searchInput, { color: C.text }]}
+            />
+          </View>
+          <TouchableOpacity
+            onPress={runSearch}
+            disabled={!searchQuery.trim() || loading}
+            activeOpacity={0.82}
+            style={[styles.searchButton, { backgroundColor: C.primary, opacity: !searchQuery.trim() || loading ? 0.55 : 1 }]}
+          >
+            <Text style={styles.searchButtonText}>{searchCopy.action}</Text>
+          </TouchableOpacity>
+        </View>
+
         {/* Mood Grid */}
         <View style={styles.moodGrid}>
           <Text style={[styles.sectionTitle, { color: C.textSecondary }]}>{t('quran_finder_prompt')}</Text>
@@ -205,12 +323,16 @@ export default function QuranFinderScreen() {
         </View>
 
         {/* Results */}
-        {selected && (
+        {(selected || searchTitle) && (
           <View style={{ paddingHorizontal: Spacing.md }}>
             <View style={[styles.resultHeader, { borderBottomColor: C.border }]}>
-              <Text style={{ color: selected.color, fontSize: 20 }}>{selected.emoji}</Text>
+              {selected ? (
+                <Text style={{ color: selected.color, fontSize: 20 }}>{selected.emoji}</Text>
+              ) : (
+                <Ionicons name="search-outline" size={20} color={C.primary} />
+              )}
               <Text style={[styles.resultTitle, { color: C.text }]}>
-                {t('verses_for')}: {MOOD_TEXT[selected.id][lang].label}
+                {selected ? `${t('verses_for')}: ${MOOD_TEXT[selected.id][lang].label}` : `${searchCopy.result}: ${searchTitle}`}
               </Text>
             </View>
 
@@ -218,7 +340,7 @@ export default function QuranFinderScreen() {
               <Card style={{ alignItems: 'center', paddingVertical: Spacing.xxl }}>
                 <ActivityIndicator color={C.primary} size="large" />
                 <Text style={{ color: C.textMuted, marginTop: 12, fontSize: FontSize.sm }}>
-                  {t('loading_qf_verses')}
+                  {selected ? t('loading_qf_verses') : searchCopy.searching}
                 </Text>
               </Card>
             ) : error ? (
@@ -230,12 +352,19 @@ export default function QuranFinderScreen() {
               </Card>
             ) : (
               <View style={{ gap: Spacing.md }}>
-                {verses.map((v) => (
+                {verses.length === 0 ? (
+                  <Card style={{ alignItems: 'center', paddingVertical: Spacing.xl }}>
+                    <Ionicons name="search-outline" size={34} color={C.textMuted} />
+                    <Text style={{ color: C.textMuted, marginTop: 8, textAlign: 'center', fontSize: FontSize.sm }}>
+                      {searchCopy.empty}
+                    </Text>
+                  </Card>
+                ) : verses.map((v) => (
                   <Card key={v.verseKey} style={{ gap: Spacing.sm }}>
                     {/* Verse key badge */}
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <View style={[styles.verseKeyBadge, { backgroundColor: `${selected.color}20` }]}>
-                        <Text style={{ color: selected.color, fontSize: FontSize.xs, fontWeight: '700' }}>
+                      <View style={[styles.verseKeyBadge, { backgroundColor: `${selected?.color ?? C.primary}20` }]}>
+                        <Text style={{ color: selected?.color ?? C.primary, fontSize: FontSize.xs, fontWeight: '700' }}>
                           QS {v.verseKey}
                         </Text>
                       </View>
@@ -266,12 +395,14 @@ export default function QuranFinderScreen() {
                 ))}
 
                 {/* Attribution */}
-                <View style={[styles.attribution, { borderColor: C.border }]}>
-                  <Ionicons name="information-circle-outline" size={14} color={C.textMuted} />
-                  <Text style={{ color: C.textMuted, fontSize: FontSize.xs, marginLeft: 4 }}>
-                    {t('qf_attribution')}
-                  </Text>
-                </View>
+                {verses.length > 0 && (
+                  <View style={[styles.attribution, { borderColor: C.border }]}>
+                    <Ionicons name="information-circle-outline" size={14} color={C.textMuted} />
+                    <Text style={{ color: C.textMuted, fontSize: FontSize.xs, marginLeft: 4 }}>
+                      {t('qf_attribution')}
+                    </Text>
+                  </View>
+                )}
               </View>
             )}
           </View>
@@ -294,6 +425,36 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: BorderRadius.full,
     borderWidth: 1,
+  },
+  searchArea: {
+    paddingHorizontal: Spacing.md,
+    paddingTop: Spacing.md,
+    gap: Spacing.sm,
+  },
+  searchBox: {
+    minHeight: 48,
+    borderRadius: BorderRadius.lg,
+    borderWidth: 1,
+    paddingHorizontal: Spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: FontSize.sm,
+    paddingVertical: 0,
+  },
+  searchButton: {
+    minHeight: 44,
+    borderRadius: BorderRadius.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  searchButtonText: {
+    color: '#fff',
+    fontSize: FontSize.sm,
+    fontWeight: '800',
   },
   moodGrid: {
     padding: Spacing.md,

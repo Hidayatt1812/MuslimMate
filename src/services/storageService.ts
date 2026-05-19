@@ -39,6 +39,7 @@ export const STORAGE_KEYS = {
   LOCATION: 'muslimmate_location',
   DAILY_VERSE: 'muslimmate_daily_verse',
   AI_CHAT: 'muslimmate_ai_chat',
+  ONBOARDING_DONE: 'muslimmate_onboarding_done_v1',
   RAMADAN_LOG: 'muslimmate_ramadan_log',
   FASTING_REMINDERS: 'muslimmate_fasting_reminders',
   DHIKR_HISTORY: 'muslimmate_dhikr_history',
@@ -301,6 +302,14 @@ export async function getSettings(): Promise<AppSettings> {
 export async function updateSettings(updates: Partial<AppSettings>): Promise<void> {
   const current = await getSettings();
   await setItem(STORAGE_KEYS.SETTINGS, { ...current, ...updates });
+}
+
+export async function isOnboardingDone(): Promise<boolean> {
+  return (await getItem<boolean>(STORAGE_KEYS.ONBOARDING_DONE)) === true;
+}
+
+export async function setOnboardingDone(done = true): Promise<void> {
+  await setItem(STORAGE_KEYS.ONBOARDING_DONE, done);
 }
 
 // Tahfidz

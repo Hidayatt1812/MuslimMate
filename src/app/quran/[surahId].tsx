@@ -41,6 +41,7 @@ import {
   DEFAULT_ARABIC_SCRIPT,
   DEFAULT_RECITER,
   fetchUlamaTafsirByAyah,
+  fetchUlamaTafsirFullByAyah,
   getAudioUrl,
   getAyahAudioFallbackUrl,
   getIslamicNetworkAudioUrl,
@@ -50,13 +51,23 @@ import {
   RECITERS,
   SurahWithTranslation,
   TAJWEED_GUIDE,
+  type Ayah,
   type PemulaWordMeaning,
   type ReciterGroup,
   type ReciterSyncCapability,
   type SurahWordByWord,
+  type UlamaTafsirFullInsight,
   type UlamaTafsirInsight,
   type WordTimingSegment,
 } from '@/services/quranService';
+import {
+  fetchQFAudioReciters,
+  fetchQFAyahAudioUrl,
+  fetchQFTafsirByAyah,
+  fetchQFVerseTranslationComparisons,
+  type QFAudioReciter,
+  type QFTranslationComparison,
+} from '@/services/quranFoundationService';
 import {
   addBookmark,
   getBookmarks,
@@ -92,6 +103,7 @@ import {
 
 type DisplayMode = 'normal' | 'tajweed' | 'pemula';
 type AyahPlayMode = 'single' | 'continuous';
+type PendingFinishAction = 'none' | 'pause' | 'stop';
 type JuzScrollItem =
   | { _k: 'sep'; surahNum: number }
   | { _k: 'bas'; surahNum: number }
@@ -113,8 +125,41 @@ type QuranReaderPrefs = {
   showReaderTips?: boolean;
   showOnlyAsbabAyahs?: boolean;
 };
+type AyahTafsirSheetState = {
+  verseKey: string;
+  surahNumber: number;
+  ayahNumber: number;
+  surahName: string;
+  arabic: string;
+  translation: string;
+  loading: boolean;
+  text: string;
+  sourceName: string;
+  sourceUrl: string;
+  error: string | null;
+};
+type AyahTranslationSheetState = {
+  verseKey: string;
+  surahNumber: number;
+  ayahNumber: number;
+  surahName: string;
+  arabic: string;
+  loading: boolean;
+  items: QFTranslationComparison[];
+  error: string | null;
+};
+type AyahDetailSheetState = {
+  verseKey: string;
+  surahNumber: number;
+  ayahNumber: number;
+  surahName: string;
+  arabic: string;
+  translation: string;
+  ayah: Ayah;
+};
 
 const STORAGE_KEY = 'muslimmate_quran_prefs';
+const DEFAULT_TAFSIR_ID = 169;
 
 const MODE_OPTIONS: { id: DisplayMode; icon: keyof typeof Ionicons.glyphMap; label: string; desc: string }[] = [
   { id: 'normal',  icon: 'book-outline',         label: 'Normal',  desc: 'Tampilan standar dengan bookmark & asbabun nuzul' },
@@ -176,6 +221,7 @@ const getArabicFontFamily = (activeScript: ArabicScript): string => {
   return ARABIC_FONT_FAMILY_DEFAULT;
 };
 const WEB_READER_MAX_WIDTH = 980;
+const ESTIMATED_AYAH_ITEM_HEIGHT = 260;
 
 type GuideEntry = {
   label: string;
@@ -1223,7 +1269,24 @@ const getArabicOverflowCompensation = (safeLeft: number, safeRight: number) => {
 const ARABIC_TEXT_X_BIAS = -4;
 const AYAH_FOLLOW_VIEW_POSITION = 0.01;
 const AYAH_FOLLOW_VIEW_OFFSET = 8;
-const QARI_PROGRESS_MIN_DELTA = 0.035;
+const QARI_PROGRESS_MIN_DELTA = 0.12;
+const QARI_PROGRESS_MIN_INTERVAL_MS = 260;
+const QARI_WORD_MIN_INTERVAL_MS = 150;
+
+const findActiveWordIndex = (
+  segments: WordTimingSegment[],
+  positionMs: number
+): number | null => {
+  if (!segments.length || !Number.isFinite(positionMs)) return null;
+  const ms = Math.max(0, positionMs);
+  const current = segments.find(seg => (
+    ms >= Math.max(0, seg.startMs - 80) &&
+    ms <= Math.max(seg.endMs, seg.startMs) + 120
+  ));
+  if (current) return current.wordIndex;
+  if (ms < segments[0].startMs) return segments[0].wordIndex;
+  return segments[segments.length - 1].wordIndex;
+};
 
 const getGuideSpanStyle = (rule: string | null, fontSize: number, activeScript: ArabicScript) => {
   if (!rule || !(rule in WAQF_GUIDE)) return null;
@@ -1320,6 +1383,7 @@ export default function SurahReaderScreen() {
   const [playingAyahProgress, setPlayingAyahProgress] = useState(0);
   const [activeAyahWordIndex, setActiveAyahWordIndex] = useState<number | null>(null);
   const [playingBasmallah, setPlayingBasmallah] = useState(false);
+  const [pendingFinishAction, setPendingFinishAction] = useState<PendingFinishAction>('none');
   const [expandedAsbabun, setExpandedAsbabun] = useState<string | null>(null);
   const [ulamaTafsirState, setUlamaTafsirState] = useState<Record<string, {
     loading: boolean;
@@ -1330,6 +1394,13 @@ export default function SurahReaderScreen() {
   const [showReaderTips, setShowReaderTips] = useState(true);
   const [showLegend, setShowLegend] = useState(false);
   const [activeTajweedRule, setActiveTajweedRule] = useState<string | null>(null);
+  const [ayahTafsirSheet, setAyahTafsirSheet] = useState<AyahTafsirSheetState | null>(null);
+  const [ayahTranslationSheet, setAyahTranslationSheet] = useState<AyahTranslationSheetState | null>(null);
+  const [ayahDetailSheet, setAyahDetailSheet] = useState<AyahDetailSheetState | null>(null);
+  const [qfAudioReciters, setQFAudioReciters] = useState<QFAudioReciter[]>([]);
+  const [qfAudioRecitersLoading, setQFAudioRecitersLoading] = useState(false);
+  const [qfAudioRecitersError, setQFAudioRecitersError] = useState<string | null>(null);
+  const [qfAudioPlayingId, setQFAudioPlayingId] = useState<number | null>(null);
 
   // Juz mode: continuous scroll state
   const [juzSurahMap, setJuzSurahMap] = useState<Map<number, SurahWithTranslation>>(new Map());
@@ -1374,9 +1445,13 @@ export default function SurahReaderScreen() {
   const initialStartAyahTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const fallbackReciterNoticeRef = useRef(false);
   const capabilityResolveReqRef = useRef(0);
+  const pendingFinishActionRef = useRef<PendingFinishAction>('none');
+  const startingPlaybackRef = useRef(false);
   const userScrollingRef = useRef(false);
   const autoScrollSuppressedUntilRef = useRef(0);
   const releaseUserScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastProgressUiUpdateRef = useRef(0);
+  const lastActiveWordUiUpdateRef = useRef(0);
 
   const soundRef = useRef<AudioPlayer | null>(null);
   const flatListRef = useRef<FlatList>(null);
@@ -1498,6 +1573,191 @@ export default function SurahReaderScreen() {
     setJuzPlayingKey(null);
   }, []);
 
+  const closeAyahTafsir = useCallback(() => {
+    setAyahTafsirSheet(null);
+  }, []);
+
+  const closeAyahTranslations = useCallback(() => {
+    setAyahTranslationSheet(null);
+  }, []);
+
+  const closeAyahDetail = useCallback(() => {
+    setAyahDetailSheet(null);
+  }, []);
+
+  const loadQFAudioReciters = useCallback(async () => {
+    if (qfAudioRecitersLoading) return;
+    setQFAudioRecitersLoading(true);
+    setQFAudioRecitersError(null);
+    try {
+      const rows = await fetchQFAudioReciters(lang);
+      setQFAudioReciters(rows);
+      if (!rows.length) setQFAudioRecitersError(t('qf_audio_unavailable'));
+    } catch {
+      setQFAudioRecitersError(t('qf_audio_unavailable'));
+    } finally {
+      setQFAudioRecitersLoading(false);
+    }
+  }, [lang, qfAudioRecitersLoading, t]);
+
+  useEffect(() => {
+    setQFAudioReciters([]);
+    setQFAudioRecitersError(null);
+  }, [lang]);
+
+  useEffect(() => {
+    if (!ayahDetailSheet || qfAudioReciters.length > 0 || qfAudioRecitersLoading) return;
+    loadQFAudioReciters().catch(() => {});
+  }, [ayahDetailSheet, qfAudioReciters.length, qfAudioRecitersLoading, loadQFAudioReciters]);
+
+  const openAyahDetail = useCallback((
+    ayah: Ayah,
+    arabicText: string,
+    translationText: string,
+    targetSurahNumber = num,
+    targetSurahName?: string
+  ) => {
+    const verseKey = `${targetSurahNumber}:${ayah.numberInSurah}`;
+    const fallbackSurahName =
+      targetSurahName ??
+      SURAH_LIST.find(s => s.number === targetSurahNumber)?.englishName ??
+      `Surah ${targetSurahNumber}`;
+
+    setAyahDetailSheet({
+      verseKey,
+      surahNumber: targetSurahNumber,
+      ayahNumber: ayah.numberInSurah,
+      surahName: fallbackSurahName,
+      arabic: arabicText,
+      translation: translationText,
+      ayah,
+    });
+  }, [num]);
+
+  const pickAyahTafsirText = useCallback((full: UlamaTafsirFullInsight | null, qfText: string) => {
+    if (lang === 'id') {
+      return full?.textIndonesian || qfText || full?.textEnglish || full?.textOriginal || '';
+    }
+    return full?.textEnglish || qfText || full?.textOriginal || full?.textIndonesian || '';
+  }, [lang]);
+
+  const openAyahTafsir = useCallback(async (
+    ayahNumberInSurah: number,
+    arabicText: string,
+    translationText: string,
+    targetSurahNumber = num,
+    targetSurahName?: string
+  ) => {
+    const verseKey = `${targetSurahNumber}:${ayahNumberInSurah}`;
+    const fallbackSurahName =
+      targetSurahName ??
+      SURAH_LIST.find(s => s.number === targetSurahNumber)?.englishName ??
+      `Surah ${targetSurahNumber}`;
+
+    setAyahTafsirSheet({
+      verseKey,
+      surahNumber: targetSurahNumber,
+      ayahNumber: ayahNumberInSurah,
+      surahName: fallbackSurahName,
+      arabic: arabicText,
+      translation: translationText,
+      loading: true,
+      text: '',
+      sourceName: 'Ibnu Katsir (Ringkas)',
+      sourceUrl: `https://quran.com/${verseKey}?tafsir=${DEFAULT_TAFSIR_ID}`,
+      error: null,
+    });
+
+    try {
+      const [qfText, fullTafsir] = await Promise.all([
+        fetchQFTafsirByAyah(verseKey, DEFAULT_TAFSIR_ID, lang).catch(() => ''),
+        fetchUlamaTafsirFullByAyah(targetSurahNumber, ayahNumberInSurah, DEFAULT_TAFSIR_ID).catch(() => null),
+      ]);
+      const text = pickAyahTafsirText(fullTafsir, qfText);
+      setAyahTafsirSheet(prev => {
+        if (!prev || prev.verseKey !== verseKey) return prev;
+        return {
+          ...prev,
+          loading: false,
+          text,
+          sourceName: fullTafsir?.sourceName || prev.sourceName,
+          sourceUrl: fullTafsir?.sourceUrl || prev.sourceUrl,
+          error: text ? null : t('tafsir_not_available_error'),
+        };
+      });
+    } catch {
+      setAyahTafsirSheet(prev => {
+        if (!prev || prev.verseKey !== verseKey) return prev;
+        return {
+          ...prev,
+          loading: false,
+          error: t('failed_load_tafsir'),
+        };
+      });
+    }
+  }, [lang, num, pickAyahTafsirText, t]);
+
+  const openAyahTafsirSource = useCallback(async () => {
+    const target = ayahTafsirSheet?.sourceUrl?.trim();
+    if (!target) return;
+    try {
+      const canOpen = await Linking.canOpenURL(target);
+      if (!canOpen) {
+        Alert.alert(t('open_link_failed_title'), t('open_link_failed_message'));
+        return;
+      }
+      await Linking.openURL(target);
+    } catch {
+      Alert.alert(t('open_link_failed_title'), t('open_link_failed_message'));
+    }
+  }, [ayahTafsirSheet?.sourceUrl, t]);
+
+  const openAyahTranslations = useCallback(async (
+    ayahNumberInSurah: number,
+    arabicText: string,
+    targetSurahNumber = num,
+    targetSurahName?: string
+  ) => {
+    const verseKey = `${targetSurahNumber}:${ayahNumberInSurah}`;
+    const fallbackSurahName =
+      targetSurahName ??
+      SURAH_LIST.find(s => s.number === targetSurahNumber)?.englishName ??
+      `Surah ${targetSurahNumber}`;
+
+    setAyahTranslationSheet({
+      verseKey,
+      surahNumber: targetSurahNumber,
+      ayahNumber: ayahNumberInSurah,
+      surahName: fallbackSurahName,
+      arabic: arabicText,
+      loading: true,
+      items: [],
+      error: null,
+    });
+
+    try {
+      const items = await fetchQFVerseTranslationComparisons(verseKey, lang);
+      setAyahTranslationSheet(prev => {
+        if (!prev || prev.verseKey !== verseKey) return prev;
+        return {
+          ...prev,
+          loading: false,
+          items,
+          error: items.length ? null : t('translation_compare_empty'),
+        };
+      });
+    } catch {
+      setAyahTranslationSheet(prev => {
+        if (!prev || prev.verseKey !== verseKey) return prev;
+        return {
+          ...prev,
+          loading: false,
+          error: t('finder_load_error'),
+        };
+      });
+    }
+  }, [lang, num, t]);
+
   const [navDirState, setNavDirState] = useState<'next' | 'prev' | null>(
     navDirParam === 'next' ? 'next' : navDirParam === 'prev' ? 'prev' : null
   );
@@ -1600,7 +1860,6 @@ export default function SurahReaderScreen() {
     if (typeof sourceIdx !== 'number') return -1;
     return visibleSourceIndexMap.get(sourceIdx) ?? -1;
   }, [ayahSourceIndexMap, visibleSourceIndexMap]);
-
   const getJuzListIndexForAyah = useCallback((surahNum: number, ayahN: number): number => {
     for (let i = 0; i < juzScrollData.length; i++) {
       const item = juzScrollData[i];
@@ -1855,8 +2114,8 @@ export default function SurahReaderScreen() {
       if (!active || reqId !== capabilityResolveReqRef.current) return;
       const hasWordTiming = Object.keys(timing).length > 0;
       const nextCapability: ReciterSyncCapability = hasWordTiming ? 'full' : 'follow';
-      setReciterCapability(nextCapability);
       setSurahWordTimingMap(hasWordTiming ? timing : {});
+      setReciterCapability(nextCapability);
       setReciterCapabilityMap(prev => (
         prev[reciter.id] === nextCapability
           ? prev
@@ -1864,8 +2123,8 @@ export default function SurahReaderScreen() {
       ));
     })().catch(() => {
       if (!active || reqId !== capabilityResolveReqRef.current) return;
-      setReciterCapability('follow');
       setSurahWordTimingMap({});
+      setReciterCapability('follow');
       setReciterCapabilityMap(prev => (
         prev[reciter.id] === 'follow'
           ? prev
@@ -2275,12 +2534,15 @@ export default function SurahReaderScreen() {
     }
 
     playbackRequestRef.current++;
+    pendingFinishActionRef.current = 'none';
+    setPendingFinishAction('none');
     await unloadCurrentSound();
     surahModeRef.current = false;
     setIsPlayingSurah(false);
     setIsSurahPaused(false);
     setPlayingAyah(null);
     setPlayingAyahProgress(0);
+    setActiveAyahWordIndex(null);
     setPlayingBasmallah(false);
     setTranslitTexts(null);
     setWordByWordMap(null);
@@ -2323,6 +2585,8 @@ export default function SurahReaderScreen() {
       ]);
 
       playbackRequestRef.current++;
+      pendingFinishActionRef.current = 'none';
+      setPendingFinishAction('none');
       await unloadCurrentSound();
       surahModeRef.current = false;
       chainPlaybackRef.current = false;
@@ -2332,6 +2596,7 @@ export default function SurahReaderScreen() {
       setIsSurahPaused(false);
       setPlayingAyah(null);
       setPlayingAyahProgress(0);
+      setActiveAyahWordIndex(null);
       setPlayingBasmallah(false);
       setTranslitTexts(null);
       setWordByWordMap(null);
@@ -2402,7 +2667,6 @@ export default function SurahReaderScreen() {
     if (!Number.isFinite(ayahNumberInSurah) || ayahNumberInSurah <= 0) return;
 
     if (opts?.force) {
-      // Force: ayah baru mulai diputar — override semua suppression
       userScrollingRef.current = false;
       autoScrollSuppressedUntilRef.current = 0;
     } else {
@@ -2438,57 +2702,121 @@ export default function SurahReaderScreen() {
     if (listIndex < 0) return;
 
     try {
-      flatListRef.current?.scrollToIndex({
-        index: listIndex,
-        animated: opts?.animated ?? true,
-        viewPosition: AYAH_FOLLOW_VIEW_POSITION,
-        viewOffset: AYAH_FOLLOW_VIEW_OFFSET,
-      });
-    } catch {
-      setTimeout(() => {
-        if (!opts?.force && userScrollingRef.current) return;
+      requestAnimationFrame(() => {
         flatListRef.current?.scrollToIndex({
           index: listIndex,
           animated: opts?.animated ?? true,
           viewPosition: AYAH_FOLLOW_VIEW_POSITION,
           viewOffset: AYAH_FOLLOW_VIEW_OFFSET,
         });
+      });
+    } catch {
+      const estimatedOffset = Math.max(0, listIndex * ESTIMATED_AYAH_ITEM_HEIGHT);
+      setTimeout(() => {
+        if (!opts?.force && userScrollingRef.current) return;
+        flatListRef.current?.scrollToOffset({
+          offset: estimatedOffset,
+          animated: opts?.animated ?? true,
+        });
       }, 140);
     }
   }, [isJuzMode, num, getJuzListIndexForAyah, getVisibleListIndexForAyah]);
 
-  const clearPlayingAyahState = useCallback(() => {
-    setPlayingAyah(null);
-    setPlayingAyahProgress(0);
+  const resetPlaybackHighlight = useCallback((initialProgress = 0) => {
+    lastProgressUiUpdateRef.current = 0;
+    lastActiveWordUiUpdateRef.current = 0;
+    setPlayingAyahProgress(initialProgress);
     setActiveAyahWordIndex(null);
   }, []);
 
-  const activatePlayingAyah = useCallback((ayahNumberInSurah: number, forceScroll = true) => {
-    setPlayingAyah(ayahNumberInSurah);
-    setPlayingAyahProgress(0.02);
-    setActiveAyahWordIndex(null);
-    scrollAyahToTop(ayahNumberInSurah, { animated: true, force: forceScroll });
-  }, [scrollAyahToTop]);
-
-  const updatePlayingAyahProgress = useCallback((ratio: number) => {
+  const updatePlayingAyahProgress = useCallback((ratio: number, force = false) => {
     const clamped = Math.max(0, Math.min(1, Number(ratio) || 0));
+    const now = Date.now();
+    const isNearlyDone = clamped >= 0.995;
+
+    if (!force && !isNearlyDone && now - lastProgressUiUpdateRef.current < QARI_PROGRESS_MIN_INTERVAL_MS) {
+      return;
+    }
+
     setPlayingAyahProgress(prev => {
-      if (Math.abs(prev - clamped) < QARI_PROGRESS_MIN_DELTA && clamped < 0.995) return prev;
+      if (!force && !isNearlyDone && Math.abs(prev - clamped) < QARI_PROGRESS_MIN_DELTA) {
+        return prev;
+      }
+      lastProgressUiUpdateRef.current = now;
       return clamped;
     });
   }, []);
 
-  const findActiveWordIndex = useCallback((segments: WordTimingSegment[], positionMs: number): number | null => {
-    if (!segments.length) return null;
-    const cursor = Math.max(0, Math.floor(positionMs));
-    for (const seg of segments) {
-      if (cursor >= (seg.startMs - 100) && cursor <= (seg.endMs + 120)) {
-        return seg.wordIndex;
-      }
+  const updateActiveAyahWordIndex = useCallback((wordIndex: number | null, force = false) => {
+    const now = Date.now();
+    if (!force && now - lastActiveWordUiUpdateRef.current < QARI_WORD_MIN_INTERVAL_MS) {
+      return;
     }
-    if (cursor < segments[0].startMs) return segments[0].wordIndex;
-    return segments[segments.length - 1].wordIndex;
+    lastActiveWordUiUpdateRef.current = now;
+    setActiveAyahWordIndex(prev => (prev === wordIndex ? prev : wordIndex));
   }, []);
+
+  const setPendingFinishActionState = useCallback((action: PendingFinishAction) => {
+    pendingFinishActionRef.current = action;
+    setPendingFinishAction(action);
+  }, []);
+
+  const clearPendingFinishAction = useCallback(() => {
+    setPendingFinishActionState('none');
+  }, [setPendingFinishActionState]);
+
+  const clearPlayingAyahState = useCallback(() => {
+    setPlayingAyah(null);
+    resetPlaybackHighlight();
+  }, [resetPlaybackHighlight]);
+
+  const activatePlayingAyah = useCallback((ayahNumberInSurah: number, forceScroll = true) => {
+    resetPlaybackHighlight(0.02);
+    setPlayingAyah(ayahNumberInSurah);
+    scrollAyahToTop(ayahNumberInSurah, { animated: true, force: forceScroll });
+  }, [resetPlaybackHighlight, scrollAyahToTop]);
+
+  const finishSurahPlaybackNow = useCallback(async (invalidateRequest = true) => {
+    if (invalidateRequest) playbackRequestRef.current++;
+    clearPendingFinishAction();
+    setQFAudioPlayingId(null);
+    surahModeRef.current = false;
+    chainPlaybackRef.current = false;
+    setIsPlayingSurah(false);
+    setIsSurahPaused(false);
+    clearJuzPlayingState();
+    await unloadCurrentSound();
+    setPlayingBasmallah(false);
+    clearPlayingAyahState();
+    useQuranAudioStore.getState().deactivate();
+    try { await setAudioModeAsync({ shouldPlayInBackground: false }); } catch {}
+  }, [clearJuzPlayingState, clearPendingFinishAction, clearPlayingAyahState, unloadCurrentSound]);
+
+  const pauseSurahAtBoundary = useCallback(async (nextIndex: number) => {
+    playbackRequestRef.current++;
+    clearPendingFinishAction();
+    await unloadCurrentSound();
+    setPlayingBasmallah(false);
+    clearPlayingAyahState();
+    surahModeRef.current = true;
+    currentSurahIdxRef.current = Math.max(0, nextIndex);
+    setIsPlayingSurah(true);
+    setIsSurahPaused(true);
+    useQuranAudioStore.getState().setCurrentAyah(Math.max(0, nextIndex));
+    useQuranAudioStore.getState().setPlayState(false, true);
+  }, [clearPendingFinishAction, clearPlayingAyahState, unloadCurrentSound]);
+
+  const requestFinishAfterCurrentAyah = useCallback((action: Exclude<PendingFinishAction, 'none'>) => {
+    if (!isPlayingSurah) return;
+    if (pendingFinishActionRef.current === action) return;
+    if (!soundRef.current) {
+      finishSurahPlaybackNow(true).catch(() => {});
+      return;
+    }
+    setPendingFinishActionState(action);
+    setIsSurahPaused(false);
+    useQuranAudioStore.getState().setPlayState(true, false);
+  }, [finishSurahPlaybackNow, isPlayingSurah, setPendingFinishActionState]);
 
   // â"€â"€ Actions â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -2664,11 +2992,9 @@ export default function SurahReaderScreen() {
   // Putar ayat ke-index dalam mode surah (auto-advance)
   const playAyahAt = useCallback(async (index: number) => {
     const requestId = ++playbackRequestRef.current;
-    // Hentikan audio lama segera agar tidak double suara
-    const _prev = soundRef.current;
-    soundRef.current = null;
-    quranAudioService.detach();
-    if (_prev) { try { _prev.clearLockScreenControls(); } catch {} try { _prev.remove(); } catch {} }
+    clearPendingFinishAction();
+    setQFAudioPlayingId(null);
+    await unloadCurrentSound();
     const data = surahDataRef.current;
     const rec = reciterRef.current;
     if (!data) return;
@@ -2709,7 +3035,6 @@ export default function SurahReaderScreen() {
     try {
       if (requestId !== playbackRequestRef.current) return;
       setIsSurahPaused(false);
-      scrollAyahToTop(ayah.numberInSurah, { animated: true });
 
       if (rec.surahOnly) {
         const offlineSurahUrl = await getOfflineSurahAudioUri(num, rec.id);
@@ -2763,7 +3088,9 @@ export default function SurahReaderScreen() {
       }
 
       const preferTimingAudio = reciterCapability === 'full';
-      const ayahTimingSegments = preferTimingAudio ? (surahWordTimingMap[ayah.numberInSurah] ?? []) : [];
+      const ayahTimingSegments = preferTimingAudio
+        ? (surahWordTimingMap[ayah.numberInSurah] ?? [])
+        : [];
       const clips: Array<{
         urls: string[];
         usedFallbackReciter?: boolean;
@@ -2795,13 +3122,13 @@ export default function SurahReaderScreen() {
         urls: ayahClip.urls,
         usedFallbackReciter: ayahClip.usedFallbackReciter,
         onStart: () => {
-          activatePlayingAyah(ayah.numberInSurah);
+          activatePlayingAyah(ayah.numberInSurah, false);
         },
         onProgress: info => {
+          if (!preferTimingAudio) return;
           updatePlayingAyahProgress(info.ratio);
-          if (!preferTimingAudio || !ayahTimingSegments.length) return;
-          const activeWord = findActiveWordIndex(ayahTimingSegments, info.positionMs);
-          setActiveAyahWordIndex(prev => (prev === activeWord ? prev : activeWord));
+          if (!ayahTimingSegments.length) return;
+          updateActiveAyahWordIndex(findActiveWordIndex(ayahTimingSegments, info.positionMs));
         },
       });
 
@@ -2811,6 +3138,19 @@ export default function SurahReaderScreen() {
         () => {
           if (requestId !== playbackRequestRef.current) return;
           setPlayingBasmallah(false);
+          const pendingFinish = pendingFinishActionRef.current;
+          if (pendingFinish === 'pause') {
+            if (clampedIndex < maxIndex) {
+              pauseSurahAtBoundary(clampedIndex + 1).catch(() => {});
+            } else {
+              finishSurahPlaybackNow(true).catch(() => {});
+            }
+            return;
+          }
+          if (pendingFinish === 'stop') {
+            finishSurahPlaybackNow(true).catch(() => {});
+            return;
+          }
           if (surahModeRef.current) {
             playAyahAt(clampedIndex + 1);
           } else {
@@ -2846,15 +3186,18 @@ export default function SurahReaderScreen() {
     num,
     goToSurah,
     playAudioQueue,
+    unloadCurrentSound,
     showBasmalah,
     buildAyahClipUrls,
     activatePlayingAyah,
     clearPlayingAyahState,
-    scrollAyahToTop,
-    updatePlayingAyahProgress,
+    clearPendingFinishAction,
     reciterCapability,
     surahWordTimingMap,
-    findActiveWordIndex,
+    updatePlayingAyahProgress,
+    updateActiveAyahWordIndex,
+    pauseSurahAtBoundary,
+    finishSurahPlaybackNow,
     showOptionalAudioDownloadPrompt,
     getAyahBoundsForCurrentSurah,
     isJuzMode,
@@ -2864,41 +3207,50 @@ export default function SurahReaderScreen() {
   ]);
 
   const startSurahPlayback = async (fromIndex = 0, chain = true) => {
+    if (startingPlaybackRef.current) return;
+    startingPlaybackRef.current = true;
     const rec = reciterRef.current;
-    const ayahCount = surahDataRef.current?.arabic.ayahs.length ?? 0;
-    const { startAyah, endAyahInSurah } = getAyahBoundsForCurrentSurah(Math.max(ayahCount, 1));
-    const minIndex = Math.max(0, startAyah - 1);
-    const maxIndex = Math.max(minIndex, endAyahInSurah - 1);
-    const requestedIndex = rec.surahOnly ? minIndex : Math.max(minIndex, fromIndex);
-    const effectiveFromIndex = Math.min(requestedIndex, maxIndex);
-    surahModeRef.current = true;
-    chainPlaybackRef.current = chain;
-    currentSurahIdxRef.current = effectiveFromIndex;
-    setIsPlayingSurah(true);
-    setIsSurahPaused(false);
-    // Aktivasi store untuk mini player
-    useQuranAudioStore.getState().activate({
-      surahNumber: num,
-      surahName: surahMeta?.englishName ?? `Surah ${num}`,
-      surahNameAr: surahMeta?.name ?? '',
-      reciterName: rec.name,
-      currentAyahIndex: effectiveFromIndex,
-      totalAyahs: ayahCount,
-    });
-    await setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: true, interruptionMode: 'doNotMix' });
-    await playAyahAt(effectiveFromIndex);
+    try {
+      clearPendingFinishAction();
+      const ayahCount = surahDataRef.current?.arabic.ayahs.length ?? 0;
+      const { startAyah, endAyahInSurah } = getAyahBoundsForCurrentSurah(Math.max(ayahCount, 1));
+      const minIndex = Math.max(0, startAyah - 1);
+      const maxIndex = Math.max(minIndex, endAyahInSurah - 1);
+      const requestedIndex = rec.surahOnly ? minIndex : Math.max(minIndex, fromIndex);
+      const effectiveFromIndex = Math.min(requestedIndex, maxIndex);
+      surahModeRef.current = true;
+      chainPlaybackRef.current = chain;
+      currentSurahIdxRef.current = effectiveFromIndex;
+      setIsPlayingSurah(true);
+      setIsSurahPaused(false);
+      // Aktivasi store untuk mini player
+      useQuranAudioStore.getState().activate({
+        surahNumber: num,
+        surahName: surahMeta?.englishName ?? `Surah ${num}`,
+        surahNameAr: surahMeta?.name ?? '',
+        reciterName: rec.name,
+        currentAyahIndex: effectiveFromIndex,
+        totalAyahs: ayahCount,
+      });
+      await setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: true, interruptionMode: 'doNotMix' });
+      await playAyahAt(effectiveFromIndex);
+    } finally {
+      startingPlaybackRef.current = false;
+    }
   };
 
   const pauseSurahPlayback = async () => {
     if (!isPlayingSurah || isSurahPaused) return;
-    try {
-      soundRef.current?.pause();
-      setIsSurahPaused(true);
-      useQuranAudioStore.getState().setPlayState(false, true);
-    } catch {}
+    requestFinishAfterCurrentAyah('pause');
   };
 
   const resumeSurahPlayback = async () => {
+    if (pendingFinishActionRef.current !== 'none') {
+      clearPendingFinishAction();
+      setIsSurahPaused(false);
+      useQuranAudioStore.getState().setPlayState(true, false);
+      return;
+    }
     if (!isPlayingSurah) {
       await startSurahPlayback(currentSurahIdxRef.current, chainPlaybackRef.current);
       return;
@@ -2916,18 +3268,11 @@ export default function SurahReaderScreen() {
   };
 
   const stopSurahPlayback = async () => {
-    playbackRequestRef.current++;
-    surahModeRef.current = false;
-    chainPlaybackRef.current = false;
-    setIsPlayingSurah(false);
-    setIsSurahPaused(false);
-    clearJuzPlayingState();
-    await unloadCurrentSound();
-    setPlayingBasmallah(false);
-    clearPlayingAyahState();
-    useQuranAudioStore.getState().deactivate();
-    // Kembalikan mode audio ke default (non-background) setelah selesai
-    try { await setAudioModeAsync({ shouldPlayInBackground: false }); } catch {}
+    if (reciterRef.current.surahOnly) {
+      await finishSurahPlaybackNow(true);
+      return;
+    }
+    requestFinishAfterCurrentAyah('stop');
   };
 
   const playAudio = async (_globalAyahNumber: number, numberInSurah: number) => {
@@ -2941,20 +3286,27 @@ export default function SurahReaderScreen() {
     // Hentikan mode surah dulu
     surahModeRef.current = false;
     chainPlaybackRef.current = false;
+    setQFAudioPlayingId(null);
     setIsPlayingSurah(false);
     setIsSurahPaused(false);
     clearJuzPlayingState();
     try {
       // Cek soundRef.current (bukan state) agar tidak pakai nilai stale setelah stop
-      if (soundRef.current && ((playingAyah === numberInSurah) || (numberInSurah === 1 && playingBasmallah))) { await stopAudio(); return; }
+      if (soundRef.current && ((playingAyah === numberInSurah) || (numberInSurah === 1 && playingBasmallah))) {
+        setPendingFinishActionState('stop');
+        return;
+      }
       const requestId = ++playbackRequestRef.current;
+      clearPendingFinishAction();
       // Hentikan audio lama segera agar tidak double suara
       await unloadCurrentSound();
       if (requestId !== playbackRequestRef.current) return;
       await setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: false });
 
       const preferTimingAudio = reciterCapability === 'full';
-      const ayahTimingSegments = preferTimingAudio ? (surahWordTimingMap[numberInSurah] ?? []) : [];
+      const ayahTimingSegments = preferTimingAudio
+        ? (surahWordTimingMap[numberInSurah] ?? [])
+        : [];
       const clips: Array<{
         urls: string[];
         usedFallbackReciter?: boolean;
@@ -2985,12 +3337,12 @@ export default function SurahReaderScreen() {
       clips.push({
         urls: ayahClip.urls,
         usedFallbackReciter: ayahClip.usedFallbackReciter,
-        onStart: () => activatePlayingAyah(numberInSurah),
+        onStart: () => activatePlayingAyah(numberInSurah, false),
         onProgress: info => {
+          if (!preferTimingAudio) return;
           updatePlayingAyahProgress(info.ratio);
-          if (!preferTimingAudio || !ayahTimingSegments.length) return;
-          const activeWord = findActiveWordIndex(ayahTimingSegments, info.positionMs);
-          setActiveAyahWordIndex(prev => (prev === activeWord ? prev : activeWord));
+          if (!ayahTimingSegments.length) return;
+          updateActiveAyahWordIndex(findActiveWordIndex(ayahTimingSegments, info.positionMs));
         },
       });
 
@@ -2999,11 +3351,13 @@ export default function SurahReaderScreen() {
         requestId,
         () => {
           if (requestId !== playbackRequestRef.current) return;
+          clearPendingFinishAction();
           setPlayingBasmallah(false);
           clearPlayingAyahState();
         },
         () => {
           if (requestId !== playbackRequestRef.current) return;
+          clearPendingFinishAction();
           setPlayingBasmallah(false);
           clearPlayingAyahState();
           showOptionalAudioDownloadPrompt(
@@ -3014,6 +3368,7 @@ export default function SurahReaderScreen() {
         }
       );
     } catch {
+      clearPendingFinishAction();
       setPlayingBasmallah(false);
       clearPlayingAyahState();
       showOptionalAudioDownloadPrompt(
@@ -3026,6 +3381,8 @@ export default function SurahReaderScreen() {
 
   const stopAudio = async () => {
     playbackRequestRef.current++;
+    clearPendingFinishAction();
+    setQFAudioPlayingId(null);
     surahModeRef.current = false;
     chainPlaybackRef.current = false;
     setIsPlayingSurah(false);
@@ -3035,6 +3392,54 @@ export default function SurahReaderScreen() {
     setPlayingBasmallah(false);
     clearPlayingAyahState();
     useQuranAudioStore.getState().deactivate();
+  };
+
+  const playQFAyahAudio = async (reciterItem: QFAudioReciter) => {
+    const sheet = ayahDetailSheet;
+    if (!sheet) return;
+
+    if (qfAudioPlayingId === reciterItem.id && soundRef.current) {
+      setPendingFinishActionState('stop');
+      return;
+    }
+
+    await stopAudio();
+    const requestId = ++playbackRequestRef.current;
+    setQFAudioPlayingId(reciterItem.id);
+    try {
+      await setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: false });
+      const url = await fetchQFAyahAudioUrl(sheet.verseKey, reciterItem.id);
+      if (!url) throw new Error('Audio URL kosong');
+      await playAudioQueue(
+        [{
+          urls: [url],
+          onStart: () => {
+            setQFAudioPlayingId(reciterItem.id);
+            activatePlayingAyah(sheet.ayahNumber);
+          },
+        }],
+        requestId,
+        () => {
+          if (requestId !== playbackRequestRef.current) return;
+          clearPendingFinishAction();
+          setQFAudioPlayingId(null);
+          clearPlayingAyahState();
+        },
+        () => {
+          if (requestId !== playbackRequestRef.current) return;
+          clearPendingFinishAction();
+          setQFAudioPlayingId(null);
+          clearPlayingAyahState();
+          Alert.alert(t('audio_download_failed_title'), t('qf_audio_unavailable'));
+        }
+      );
+    } catch {
+      if (requestId !== playbackRequestRef.current) return;
+      clearPendingFinishAction();
+      setQFAudioPlayingId(null);
+      clearPlayingAyahState();
+      Alert.alert(t('audio_download_failed_title'), t('qf_audio_unavailable'));
+    }
   };
 
   const handleAyahPlayPress = async (globalAyahNumber: number, numberInSurah: number) => {
@@ -3047,6 +3452,7 @@ export default function SurahReaderScreen() {
     }
     await handleAyahPress(numberInSurah);
     scrollAyahToTop(numberInSurah, { animated: true, force: true });
+    if (pendingFinishActionRef.current !== 'none') return;
     if (ayahPlayMode === 'continuous') {
       const targetIdx = Math.max(0, numberInSurah - 1);
       // Cek soundRef.current agar toggle tidak pakai isPlayingSurah yang stale setelah stop
@@ -3063,6 +3469,7 @@ export default function SurahReaderScreen() {
   // Juz mode: putar ayat secara kontinyu dari ayat yang dipilih
   const playJuzAyah = async (surahNum: number, numberInSurah: number) => {
     const key = `${surahNum}:${numberInSurah}`;
+    if (pendingFinishActionRef.current !== 'none') return;
     // Toggle off jika ayat yang sama sedang aktif
     if ((juzPlayingKeyRef.current === key && !isPlayingSurah) || (isPlayingSurah && surahNum === num && (currentSurahIdxRef.current === numberInSurah - 1) && !isSurahPaused)) {
       await stopSurahPlayback();
@@ -3645,7 +4052,8 @@ export default function SurahReaderScreen() {
           <View style={styles.ayahHeader}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <TouchableOpacity
-                onPress={() => startSurahFromAyah(arabicAyah.numberInSurah, true)}
+                onPress={() => openAyahDetail(arabicAyah, arabicText, translationAyah?.text ?? '')}
+                accessibilityLabel={`${t('ayah_detail_title')} ${arabicAyah.numberInSurah}`}
                 style={styles.ayahNumBox}
               >
                 <View style={styles.ayahNumOrnament}>
@@ -3663,7 +4071,21 @@ export default function SurahReaderScreen() {
                 onPress={() => handleAyahPlayPress(arabicAyah.number, arabicAyah.numberInSurah)}
                 style={[styles.iconBtn, { backgroundColor: isPlaying ? C.primary : C.surface }]}
               >
-                <Ionicons name={isPlaying ? 'pause' : 'play'} size={17} color={isPlaying ? '#fff' : C.textSecondary} />
+                <Ionicons name={isPlaying && pendingFinishAction !== 'none' ? 'hourglass-outline' : isPlaying ? 'pause' : 'play'} size={17} color={isPlaying ? '#fff' : C.textSecondary} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => openAyahTafsir(arabicAyah.numberInSurah, arabicText, translationAyah?.text ?? '')}
+                accessibilityLabel={`${t('ayah_tafsir_title')} ${arabicAyah.numberInSurah}`}
+                style={[styles.iconBtn, { backgroundColor: C.surface }]}
+              >
+                <Ionicons name="library-outline" size={17} color={C.textSecondary} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => openAyahTranslations(arabicAyah.numberInSurah, arabicText)}
+                accessibilityLabel={`${t('ayah_translation_title')} ${arabicAyah.numberInSurah}`}
+                style={[styles.iconBtn, { backgroundColor: C.surface }]}
+              >
+                <Ionicons name="language-outline" size={17} color={C.textSecondary} />
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => toggleBookmark(arabicAyah.numberInSurah, arabicAyah.text, translationAyah?.text ?? '')}
@@ -3704,7 +4126,7 @@ export default function SurahReaderScreen() {
         </Pressable>
       );
     },
-    [surah, bookmarks, playingAyah, playingAyahProgress, activeAyahWordIndex, reciterCapability, showTranslation, arabicFontSize, script, C, startSurahFromAyah, handleAyahPlayPress, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection]
+    [surah, bookmarks, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, showTranslation, arabicFontSize, script, C, handleAyahPlayPress, openAyahDetail, openAyahTafsir, openAyahTranslations, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection, t]
   );
 
   //Render Ayah: Tajweed Mode 
@@ -3757,7 +4179,8 @@ export default function SurahReaderScreen() {
           <View style={styles.ayahHeader}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
               <TouchableOpacity
-                onPress={() => startSurahFromAyah(arabicAyah.numberInSurah, true)}
+                onPress={() => openAyahDetail(arabicAyah, arabicText, translationAyah?.text ?? '')}
+                accessibilityLabel={`${t('ayah_detail_title')} ${arabicAyah.numberInSurah}`}
                 style={styles.ayahNumBox}
               >
                 <View style={styles.ayahNumOrnament}>
@@ -3775,7 +4198,21 @@ export default function SurahReaderScreen() {
                 onPress={() => handleAyahPlayPress(arabicAyah.number, arabicAyah.numberInSurah)}
                 style={[styles.iconBtn, { backgroundColor: isPlaying ? C.primary : C.surface }]}
               >
-                <Ionicons name={isPlaying ? 'pause' : 'play'} size={17} color={isPlaying ? '#fff' : C.textSecondary} />
+                <Ionicons name={isPlaying && pendingFinishAction !== 'none' ? 'hourglass-outline' : isPlaying ? 'pause' : 'play'} size={17} color={isPlaying ? '#fff' : C.textSecondary} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => openAyahTafsir(arabicAyah.numberInSurah, arabicText, translationAyah?.text ?? '')}
+                accessibilityLabel={`${t('ayah_tafsir_title')} ${arabicAyah.numberInSurah}`}
+                style={[styles.iconBtn, { backgroundColor: C.surface }]}
+              >
+                <Ionicons name="library-outline" size={17} color={C.textSecondary} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => openAyahTranslations(arabicAyah.numberInSurah, arabicText)}
+                accessibilityLabel={`${t('ayah_translation_title')} ${arabicAyah.numberInSurah}`}
+                style={[styles.iconBtn, { backgroundColor: C.surface }]}
+              >
+                <Ionicons name="language-outline" size={17} color={C.textSecondary} />
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => toggleBookmark(arabicAyah.numberInSurah, arabicAyah.text, translationAyah?.text ?? '')}
@@ -3815,7 +4252,7 @@ export default function SurahReaderScreen() {
         </View>
       );
     },
-    [surah, bookmarks, playingAyah, playingAyahProgress, activeAyahWordIndex, reciterCapability, showTranslation, arabicFontSize, script, C, startSurahFromAyah, handleAyahPlayPress, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection]
+    [surah, bookmarks, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, showTranslation, arabicFontSize, script, C, handleAyahPlayPress, openAyahDetail, openAyahTafsir, openAyahTranslations, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection, t]
   );
 
   // â"€â"€ Render Ayah: Pemula Mode â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -3913,7 +4350,8 @@ export default function SurahReaderScreen() {
           {/* Nomor ayat + tombol audio */}
           <View style={[styles.pemulaHeader, { borderBottomColor: C.border }]}>
             <TouchableOpacity
-              onPress={() => startSurahFromAyah(arabicAyah.numberInSurah, true)}
+              onPress={() => openAyahDetail(arabicAyah, arabicText, translationAyah?.text ?? '')}
+              accessibilityLabel={`${t('ayah_detail_title')} ${arabicAyah.numberInSurah}`}
               style={styles.pemulaNumBadge}
             >
               <View style={styles.ayahNumOrnament}>
@@ -3936,10 +4374,24 @@ export default function SurahReaderScreen() {
               onPress={() => handleAyahPlayPress(arabicAyah.number, arabicAyah.numberInSurah)}
               style={[styles.pemulaPlayBtn, { backgroundColor: isPlaying ? C.primary : C.primaryMuted }]}
             >
-              <Ionicons name={isPlaying ? 'pause' : 'play'} size={18} color={isPlaying ? '#fff' : C.primary} />
+              <Ionicons name={isPlaying && pendingFinishAction !== 'none' ? 'hourglass-outline' : isPlaying ? 'pause' : 'play'} size={18} color={isPlaying ? '#fff' : C.primary} />
               <Text style={{ color: isPlaying ? '#fff' : C.primary, fontSize: FontSize.xs, fontWeight: '700', marginLeft: 4 }}>
-                {isPlaying ? t('pause') : ayahPlayMode === 'continuous' ? t('continue_playback') : (lang === 'en' ? 'Listen' : 'Dengarkan')}
+                {isPlaying && pendingFinishAction !== 'none' ? t('finishing_ayah') : isPlaying ? t('pause') : ayahPlayMode === 'continuous' ? t('continue_playback') : (lang === 'en' ? 'Listen' : 'Dengarkan')}
               </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => openAyahTafsir(arabicAyah.numberInSurah, arabicText, translationAyah?.text ?? '')}
+              accessibilityLabel={`${t('ayah_tafsir_title')} ${arabicAyah.numberInSurah}`}
+              style={[styles.iconBtn, { backgroundColor: C.surface, marginLeft: 8 }]}
+            >
+              <Ionicons name="library-outline" size={17} color={C.textSecondary} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => openAyahTranslations(arabicAyah.numberInSurah, arabicText)}
+              accessibilityLabel={`${t('ayah_translation_title')} ${arabicAyah.numberInSurah}`}
+              style={[styles.iconBtn, { backgroundColor: C.surface, marginLeft: 8 }]}
+            >
+              <Ionicons name="language-outline" size={17} color={C.textSecondary} />
             </TouchableOpacity>
             <TouchableOpacity
               onPress={() => toggleBookmark(arabicAyah.numberInSurah, arabicAyah.text, translationAyah?.text ?? '')}
@@ -4039,7 +4491,7 @@ export default function SurahReaderScreen() {
         </View>
       );
     },
-    [surah, bookmarks, translitTexts, wordByWordMap, playingAyah, playingAyahProgress, activeAyahWordIndex, reciterCapability, showTranslation, arabicFontSize, script, C, surahMeta, showBasmalah, startSurahFromAyah, ayahPlayMode, handleAyahPlayPress, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection, lang, t]
+    [surah, bookmarks, translitTexts, wordByWordMap, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, showTranslation, arabicFontSize, script, C, surahMeta, showBasmalah, ayahPlayMode, handleAyahPlayPress, openAyahDetail, openAyahTafsir, openAyahTranslations, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection, lang, t]
   );
 
   // â"€â"€ Header komponen untuk FlatList â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -4411,6 +4863,7 @@ export default function SurahReaderScreen() {
       const transAyah = s.translation?.ayahs?.[idx];
       if (!arabicAyah) return null;
 
+      const surahM = SURAH_LIST.find(sm => sm.number === surahNum);
       const showSurahBas = surahNum !== 1 && surahNum !== 9;
       let arabicText: string;
       if (showSurahBas && idx === 0) {
@@ -4426,7 +4879,6 @@ export default function SurahReaderScreen() {
         || (isPlayingSurah && surahNum === num && playingAyah === arabicAyah.numberInSurah);
 
       const copyJuzAyah = () => {
-        const surahM = SURAH_LIST.find(sm => sm.number === surahNum);
         const label = surahM?.englishName ?? `Surah ${surahNum}`;
         Clipboard.setString([
           `${label} - ${t('verse_label')} ${arabicAyah.numberInSurah}`,
@@ -4443,7 +4895,11 @@ export default function SurahReaderScreen() {
         }]}>
           <View style={styles.ayahHeader}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <View style={styles.ayahNumBox}>
+              <TouchableOpacity
+                onPress={() => openAyahDetail(arabicAyah, arabicText, transAyah?.text ?? '', surahNum, surahM?.englishName)}
+                accessibilityLabel={`${t('ayah_detail_title')} ${arabicAyah.numberInSurah}`}
+                style={styles.ayahNumBox}
+              >
                 <View style={styles.ayahNumOrnament}>
                   <View style={[styles.ayahNumDiamondOuter, { borderColor: isPlaying ? C.primary : C.textMuted, backgroundColor: isPlaying ? `${C.primary}12` : 'transparent' }]} />
                   <View style={[styles.ayahNumDiamondInner, { borderColor: isPlaying ? `${C.primary}AA` : `${C.textMuted}CC` }]} />
@@ -4451,7 +4907,7 @@ export default function SurahReaderScreen() {
                     {String(arabicAyah.numberInSurah)}
                   </Text>
                 </View>
-              </View>
+              </TouchableOpacity>
             </View>
             <View style={styles.actionRow}>
               <TouchableOpacity
@@ -4459,10 +4915,24 @@ export default function SurahReaderScreen() {
                 style={[styles.iconBtn, { backgroundColor: isPlaying ? C.primary : C.surface }]}
               >
                 <Ionicons
-                  name={isPlaying && !isSurahPaused ? 'pause' : 'play'}
+                  name={isPlaying && pendingFinishAction !== 'none' ? 'hourglass-outline' : isPlaying && !isSurahPaused ? 'pause' : 'play'}
                   size={17}
                   color={isPlaying ? '#fff' : C.textSecondary}
                 />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => openAyahTafsir(arabicAyah.numberInSurah, arabicText, transAyah?.text ?? '', surahNum, surahM?.englishName)}
+                accessibilityLabel={`${t('ayah_tafsir_title')} ${arabicAyah.numberInSurah}`}
+                style={[styles.iconBtn, { backgroundColor: C.surface }]}
+              >
+                <Ionicons name="library-outline" size={17} color={C.textSecondary} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => openAyahTranslations(arabicAyah.numberInSurah, arabicText, surahNum, surahM?.englishName)}
+                accessibilityLabel={`${t('ayah_translation_title')} ${arabicAyah.numberInSurah}`}
+                style={[styles.iconBtn, { backgroundColor: C.surface }]}
+              >
+                <Ionicons name="language-outline" size={17} color={C.textSecondary} />
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => toggleJuzBookmark(surahNum, arabicAyah.numberInSurah, arabicText, transAyah?.text ?? '')}
@@ -4477,7 +4947,12 @@ export default function SurahReaderScreen() {
             <View style={[styles.ayahArabicCanvas, { borderColor: C.border, backgroundColor: `${C.primary}08` }]}>
               {renderArabicWithWaqfGuide(
                 arabicDisplay, arabicFontSize, C.text,
-                copyJuzAyah, safeVertical, lineHeight, safeRight, 0, null
+                copyJuzAyah,
+                safeVertical,
+                lineHeight,
+                safeRight,
+                isPlaying && surahNum === num && reciterCapability === 'full' ? playingAyahProgress : 0,
+                isPlaying && surahNum === num && reciterCapability === 'full' ? activeAyahWordIndex : null
               )}
             </View>
           </View>
@@ -4494,7 +4969,7 @@ export default function SurahReaderScreen() {
     }
     return null;
   }, [C, arabicFontSize, script, arabicFontFamily, showTranslation, juzAllBookmarks, juzPlayingKey,
-      isPlayingSurah, playingAyah, num, playJuzAyah, toggleJuzBookmark, renderArabicWithWaqfGuide,
+      isPlayingSurah, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, num, playJuzAyah, openAyahDetail, openAyahTafsir, openAyahTranslations, toggleJuzBookmark, renderArabicWithWaqfGuide,
       getSurahMeaningText, getRevelationTypeText, t]);
 
   // â"€â"€ Main render â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -4552,6 +5027,7 @@ export default function SurahReaderScreen() {
         <View style={styles.readerPlaybackRow}>
           <TouchableOpacity
             onPress={() => {
+              if (pendingFinishAction !== 'none') return;
               if (!isPlayingSurah) {
                 const startIdx = isJuzMode
                   ? Math.max(0, juzStartAyah - 1)
@@ -4565,18 +5041,22 @@ export default function SurahReaderScreen() {
             }}
             disabled={loading || !!error}
             style={[styles.readerMainPlayBtn, {
-              backgroundColor: isPlayingSurah && !isSurahPaused ? C.primary : C.primaryMuted,
+              backgroundColor: pendingFinishAction !== 'none'
+                ? C.goldMuted
+                : isPlayingSurah && !isSurahPaused ? C.primary : C.primaryMuted,
               opacity: loading || !!error ? 0.5 : 1,
             }]}
             activeOpacity={0.78}
           >
             <Ionicons
-              name={!isPlayingSurah ? 'play' : isSurahPaused ? 'play' : 'pause'}
+              name={pendingFinishAction !== 'none' ? 'hourglass-outline' : !isPlayingSurah ? 'play' : isSurahPaused ? 'play' : 'pause'}
               size={16}
-              color={isPlayingSurah && !isSurahPaused ? '#fff' : C.primary}
+              color={pendingFinishAction !== 'none' ? C.gold : isPlayingSurah && !isSurahPaused ? '#fff' : C.primary}
             />
-            <Text style={{ color: isPlayingSurah && !isSurahPaused ? '#fff' : C.primary, fontSize: 12, fontWeight: '700', marginLeft: 7 }}>
-              {!isPlayingSurah
+            <Text style={{ color: pendingFinishAction !== 'none' ? C.gold : isPlayingSurah && !isSurahPaused ? '#fff' : C.primary, fontSize: 12, fontWeight: '700', marginLeft: 7 }}>
+              {pendingFinishAction !== 'none'
+                ? t('finishing_ayah')
+                : !isPlayingSurah
                 ? (isJuzMode ? t('play_juz') : t('play_surah'))
                 : isSurahPaused ? t('continue_playback') : t('pause')}
             </Text>
@@ -4584,7 +5064,8 @@ export default function SurahReaderScreen() {
           {isPlayingSurah && (
             <TouchableOpacity
               onPress={stopSurahPlayback}
-              style={[styles.readerStopBtn, { backgroundColor: '#FF3B3015', borderColor: '#FF3B3035' }]}
+              disabled={pendingFinishAction !== 'none'}
+              style={[styles.readerStopBtn, { backgroundColor: '#FF3B3015', borderColor: '#FF3B3035', opacity: pendingFinishAction !== 'none' ? 0.55 : 1 }]}
             >
               <Ionicons name="stop" size={14} color="#FF3B30" />
               <Text style={{ color: '#FF3B30', fontSize: 11, fontWeight: '700', marginLeft: 4 }}>{t('stop')}</Text>
@@ -4750,7 +5231,7 @@ export default function SurahReaderScreen() {
               });
             }, 200);
           }}
-          extraData={[juzAllBookmarks, juzPlayingKey, showTranslation, arabicFontSize, isPlayingSurah, playingAyah, num]}
+          extraData={[juzAllBookmarks, juzPlayingKey, showTranslation, arabicFontSize, isPlayingSurah, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, num]}
         />
       ) : loading && !surah ? (
         <View style={styles.centered}>
@@ -4787,9 +5268,10 @@ export default function SurahReaderScreen() {
           ) : null}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={{ paddingBottom: isPlayingSurah ? 120 : 48, backgroundColor: C.background, flexGrow: 1 }}
-          initialNumToRender={8}
-          maxToRenderPerBatch={8}
-          windowSize={8}
+          initialNumToRender={12}
+          maxToRenderPerBatch={10}
+          updateCellsBatchingPeriod={35}
+          windowSize={12}
           removeClippedSubviews={false}
           onScrollBeginDrag={() => markUserScrolling(2200)}
           onScrollEndDrag={() => {
@@ -4802,7 +5284,7 @@ export default function SurahReaderScreen() {
             releaseUserScrollingSoon(120);
           }}
           scrollEventThrottle={16}
-          extraData={[bookmarks, playingAyah, playingAyahProgress, activeAyahWordIndex, reciterCapability, playingBasmallah, ayahPlayMode, showTranslation, showOnlyAsbabAyahs, expandedAsbabun, displayMode, translitTexts, wordByWordMap, arabicFontSize, showLegend, showTips, showReaderTips, isPlayingSurah, reciter.id]}
+          extraData={[bookmarks, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, playingBasmallah, ayahPlayMode, showTranslation, showOnlyAsbabAyahs, expandedAsbabun, displayMode, translitTexts, wordByWordMap, arabicFontSize, showLegend, showTips, showReaderTips, isPlayingSurah, reciter.id]}
           onScrollToIndexFailed={info => {
             setTimeout(() => {
               const suppressAutoScroll =
@@ -4810,13 +5292,23 @@ export default function SurahReaderScreen() {
               if (suppressAutoScroll) return;
               const maxIndex = Math.max(0, visibleAyahIndices.length - 1);
               const clampedIndex = Math.min(Math.max(info.index, 0), maxIndex);
-              flatListRef.current?.scrollToIndex({
-                index: clampedIndex,
+              const estimatedOffset = Math.max(
+                0,
+                (Number(info.averageItemLength) || ESTIMATED_AYAH_ITEM_HEIGHT) * clampedIndex
+              );
+              flatListRef.current?.scrollToOffset({
+                offset: estimatedOffset,
                 animated: true,
-                viewPosition: AYAH_FOLLOW_VIEW_POSITION,
-                viewOffset: AYAH_FOLLOW_VIEW_OFFSET,
               });
-            }, 300);
+              setTimeout(() => {
+                flatListRef.current?.scrollToIndex({
+                  index: clampedIndex,
+                  animated: true,
+                  viewPosition: AYAH_FOLLOW_VIEW_POSITION,
+                  viewOffset: AYAH_FOLLOW_VIEW_OFFSET,
+                });
+              }, 180);
+            }, 180);
           }}
         />
       ) : null}
@@ -4957,14 +5449,348 @@ export default function SurahReaderScreen() {
         </View>
       </Modal>
 
+      {/* Ayah detail sheet */}
+      <Modal visible={!!ayahDetailSheet} transparent animationType="slide" onRequestClose={closeAyahDetail}>
+        <View style={{ flex: 1 }}>
+          <Pressable
+            style={[StyleSheet.absoluteFillObject, { backgroundColor: C.overlay }]}
+            onPress={closeAyahDetail}
+          />
+          <View style={[styles.ayahTafsirSheet, { backgroundColor: C.surface }]}>
+            <View style={[styles.sheetHandle, { backgroundColor: C.border }]} />
+            {ayahDetailSheet ? (
+              <>
+                <View style={styles.ayahTafsirHeader}>
+                  <View style={[styles.ayahTafsirIcon, { backgroundColor: `${C.primary}18` }]}>
+                    <Ionicons name="information-circle-outline" size={20} color={C.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: C.text, fontSize: FontSize.lg, fontWeight: '800' }} numberOfLines={1}>
+                      {t('ayah_detail_title')}
+                    </Text>
+                    <Text style={{ color: C.textMuted, fontSize: FontSize.xs, marginTop: 2 }} numberOfLines={1}>
+                      {ayahDetailSheet.surahName} · {t('verse_label')} {ayahDetailSheet.ayahNumber}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={closeAyahDetail} hitSlop={10} style={styles.tpCloseBtn}>
+                    <Ionicons name="close" size={18} color={C.textMuted} />
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.ayahTafsirScroll}>
+                  <View style={[styles.ayahTafsirVerseBox, { backgroundColor: C.card, borderColor: C.border }]}>
+                    <Text style={[styles.ayahTafsirArabic, { color: C.text, fontFamily: arabicFontFamily }]}>
+                      {ayahDetailSheet.arabic}
+                    </Text>
+                    {!!ayahDetailSheet.translation && (
+                      <Text style={{ color: C.textSecondary, fontSize: FontSize.sm, lineHeight: 21, marginTop: 10 }}>
+                        {ayahDetailSheet.translation}
+                      </Text>
+                    )}
+                  </View>
+
+                  <View style={[styles.ayahTafsirSourceNote, { backgroundColor: `${C.primary}10`, borderColor: `${C.primary}28` }]}>
+                    <Ionicons name="cloud-outline" size={14} color={C.primary} />
+                    <Text style={{ color: C.textSecondary, fontSize: 11, lineHeight: 17, flex: 1, marginLeft: 8 }}>
+                      {t('ayah_detail_source_note')}
+                    </Text>
+                  </View>
+
+                  <View style={styles.qfAudioSection}>
+                    <View style={styles.qfAudioHeader}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: C.text, fontSize: FontSize.md, fontWeight: '800' }}>
+                          {t('qf_audio_title')}
+                        </Text>
+                        <Text style={{ color: C.textMuted, fontSize: FontSize.xs, marginTop: 2 }}>
+                          {t('qf_audio_tap_reciter')}
+                        </Text>
+                      </View>
+                      <TouchableOpacity onPress={() => loadQFAudioReciters()} hitSlop={8}>
+                        <Ionicons name="refresh-outline" size={16} color={C.textMuted} />
+                      </TouchableOpacity>
+                    </View>
+                    {qfAudioRecitersLoading ? (
+                      <View style={styles.qfAudioLoading}>
+                        <ActivityIndicator size="small" color={C.primary} />
+                        <Text style={{ color: C.textMuted, fontSize: 11, marginLeft: 8 }}>
+                          {t('qf_audio_loading')}
+                        </Text>
+                      </View>
+                    ) : qfAudioRecitersError ? (
+                      <Text style={{ color: C.error, fontSize: FontSize.sm, lineHeight: 21 }}>
+                        {qfAudioRecitersError}
+                      </Text>
+                    ) : (
+                      <View style={{ gap: 8 }}>
+                        {qfAudioReciters.map(item => {
+                          const active = qfAudioPlayingId === item.id;
+                          return (
+                            <TouchableOpacity
+                              key={`qf-reciter-${item.id}`}
+                              onPress={() => playQFAyahAudio(item)}
+                              activeOpacity={0.75}
+                              style={[
+                                styles.qfAudioReciterRow,
+                                {
+                                  backgroundColor: active ? `${C.primary}16` : C.card,
+                                  borderColor: active ? `${C.primary}55` : C.border,
+                                },
+                              ]}
+                            >
+                              <View style={[styles.qfAudioPlayIcon, { backgroundColor: active ? C.primary : C.primaryMuted }]}>
+                                <Ionicons name={active ? 'stop' : 'play'} size={14} color={active ? '#fff' : C.primary} />
+                              </View>
+                              <View style={{ flex: 1, marginLeft: 10 }}>
+                                <Text style={{ color: C.text, fontSize: FontSize.sm, fontWeight: '800' }} numberOfLines={1}>
+                                  {item.name}
+                                </Text>
+                                <Text style={{ color: C.textMuted, fontSize: 10, marginTop: 2 }} numberOfLines={1}>
+                                  {item.style || t('qf_audio_api_label')}
+                                </Text>
+                              </View>
+                              {active && (
+                                <Text style={{ color: C.primary, fontSize: 10, fontWeight: '800' }}>
+                                  {t('playing')}
+                                </Text>
+                              )}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </View>
+
+                  <View style={styles.ayahDetailGrid}>
+                    {[
+                      { label: t('global_ayah_label'), value: ayahDetailSheet.ayah.number },
+                      { label: t('juz_label'), value: ayahDetailSheet.ayah.juz },
+                      { label: t('mushaf_page_label'), value: ayahDetailSheet.ayah.page },
+                      { label: t('hizb_quarter_label'), value: ayahDetailSheet.ayah.hizbQuarter },
+                      { label: t('ruku_label'), value: ayahDetailSheet.ayah.ruku },
+                      { label: t('manzil_label'), value: ayahDetailSheet.ayah.manzil },
+                    ].map(item => (
+                      <View key={item.label} style={[styles.ayahDetailItem, { backgroundColor: C.card, borderColor: C.border }]}>
+                        <Text style={{ color: C.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 0.5 }} numberOfLines={1}>
+                          {item.label}
+                        </Text>
+                        <Text style={{ color: C.text, fontSize: 22, fontWeight: '900', marginTop: 5 }}>
+                          {Number(item.value) > 0 ? String(item.value) : '-'}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+
+                  <View
+                    style={[
+                      styles.ayahDetailSajdahBox,
+                      {
+                        backgroundColor: ayahDetailSheet.ayah.sajda ? '#14B8A614' : C.card,
+                        borderColor: ayahDetailSheet.ayah.sajda ? '#14B8A655' : C.border,
+                      },
+                    ]}
+                  >
+                    <Ionicons
+                      name={ayahDetailSheet.ayah.sajda ? 'checkmark-circle' : 'remove-circle-outline'}
+                      size={18}
+                      color={ayahDetailSheet.ayah.sajda ? '#14B8A6' : C.textMuted}
+                    />
+                    <View style={{ flex: 1, marginLeft: 10 }}>
+                      <Text style={{ color: C.text, fontSize: FontSize.sm, fontWeight: '800' }}>
+                        {t('sajdah_ayah_label')}
+                      </Text>
+                      <Text style={{ color: C.textMuted, fontSize: FontSize.xs, marginTop: 2 }}>
+                        {ayahDetailSheet.ayah.sajda ? t('sajdah_yes_label') : t('sajdah_no_label')}
+                      </Text>
+                    </View>
+                  </View>
+                </ScrollView>
+              </>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Ayah tafsir sheet */}
+      <Modal visible={!!ayahTafsirSheet} transparent animationType="slide" onRequestClose={closeAyahTafsir}>
+        <View style={{ flex: 1 }}>
+          <Pressable
+            style={[StyleSheet.absoluteFillObject, { backgroundColor: C.overlay }]}
+            onPress={closeAyahTafsir}
+          />
+          <View style={[styles.ayahTafsirSheet, { backgroundColor: C.surface }]}>
+            <View style={[styles.sheetHandle, { backgroundColor: C.border }]} />
+            {ayahTafsirSheet ? (
+              <>
+                <View style={styles.ayahTafsirHeader}>
+                  <View style={[styles.ayahTafsirIcon, { backgroundColor: `${C.primary}18` }]}>
+                    <Ionicons name="library-outline" size={18} color={C.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: C.text, fontSize: FontSize.lg, fontWeight: '800' }} numberOfLines={1}>
+                      {t('ayah_tafsir_title')}
+                    </Text>
+                    <Text style={{ color: C.textMuted, fontSize: FontSize.xs, marginTop: 2 }} numberOfLines={1}>
+                      {ayahTafsirSheet.surahName} · {t('verse_label')} {ayahTafsirSheet.ayahNumber}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={closeAyahTafsir} hitSlop={10} style={styles.tpCloseBtn}>
+                    <Ionicons name="close" size={18} color={C.textMuted} />
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.ayahTafsirScroll}>
+                  <View style={[styles.ayahTafsirVerseBox, { backgroundColor: C.card, borderColor: C.border }]}>
+                    <Text style={[styles.ayahTafsirArabic, { color: C.text, fontFamily: arabicFontFamily }]}>
+                      {ayahTafsirSheet.arabic}
+                    </Text>
+                    {!!ayahTafsirSheet.translation && (
+                      <Text style={{ color: C.textSecondary, fontSize: FontSize.sm, lineHeight: 21, marginTop: 10 }}>
+                        {ayahTafsirSheet.translation}
+                      </Text>
+                    )}
+                  </View>
+
+                  <View style={[styles.ayahTafsirSourceNote, { backgroundColor: `${C.primary}10`, borderColor: `${C.primary}28` }]}>
+                    <Ionicons name="cloud-outline" size={14} color={C.primary} />
+                    <Text style={{ color: C.textSecondary, fontSize: 11, lineHeight: 17, flex: 1, marginLeft: 8 }}>
+                      {t('ayah_tafsir_source_note')}
+                    </Text>
+                  </View>
+
+                  {ayahTafsirSheet.loading ? (
+                    <View style={styles.ayahTafsirLoading}>
+                      <ActivityIndicator size="small" color={C.primary} />
+                      <Text style={{ color: C.textMuted, fontSize: FontSize.sm, marginTop: 8 }}>
+                        {t('loading_tafsir_views')}
+                      </Text>
+                    </View>
+                  ) : ayahTafsirSheet.error ? (
+                    <Text style={{ color: C.error, fontSize: FontSize.sm, lineHeight: 21 }}>
+                      {ayahTafsirSheet.error}
+                    </Text>
+                  ) : (
+                    <>
+                      <Text style={{ color: C.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1 }}>
+                        {ayahTafsirSheet.sourceName.toUpperCase()}
+                      </Text>
+                      {ayahTafsirSheet.text
+                        .split(/\n{2,}/)
+                        .map(part => part.trim())
+                        .filter(Boolean)
+                        .map((part, idx) => (
+                          <Text key={`${ayahTafsirSheet.verseKey}-tafsir-${idx}`} style={[styles.ayahTafsirBodyText, { color: C.textSecondary }]}>
+                            {part}
+                          </Text>
+                        ))}
+                      <TouchableOpacity
+                        onPress={openAyahTafsirSource}
+                        activeOpacity={0.75}
+                        style={[styles.ayahTafsirSourceBtn, { backgroundColor: C.card, borderColor: C.border }]}
+                      >
+                        <Ionicons name="open-outline" size={14} color={C.primary} />
+                        <Text style={{ color: C.primary, fontSize: FontSize.sm, fontWeight: '800', marginLeft: 8 }}>
+                          {t('open_tafsir_source')}
+                        </Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                </ScrollView>
+              </>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Ayah translation comparison sheet */}
+      <Modal visible={!!ayahTranslationSheet} transparent animationType="slide" onRequestClose={closeAyahTranslations}>
+        <View style={{ flex: 1 }}>
+          <Pressable
+            style={[StyleSheet.absoluteFillObject, { backgroundColor: C.overlay }]}
+            onPress={closeAyahTranslations}
+          />
+          <View style={[styles.ayahTafsirSheet, { backgroundColor: C.surface }]}>
+            <View style={[styles.sheetHandle, { backgroundColor: C.border }]} />
+            {ayahTranslationSheet ? (
+              <>
+                <View style={styles.ayahTafsirHeader}>
+                  <View style={[styles.ayahTafsirIcon, { backgroundColor: `${C.primary}18` }]}>
+                    <Ionicons name="language-outline" size={18} color={C.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: C.text, fontSize: FontSize.lg, fontWeight: '800' }} numberOfLines={1}>
+                      {t('ayah_translation_title')}
+                    </Text>
+                    <Text style={{ color: C.textMuted, fontSize: FontSize.xs, marginTop: 2 }} numberOfLines={1}>
+                      {ayahTranslationSheet.surahName} · {t('verse_label')} {ayahTranslationSheet.ayahNumber}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={closeAyahTranslations} hitSlop={10} style={styles.tpCloseBtn}>
+                    <Ionicons name="close" size={18} color={C.textMuted} />
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.ayahTafsirScroll}>
+                  <View style={[styles.ayahTafsirVerseBox, { backgroundColor: C.card, borderColor: C.border }]}>
+                    <Text style={[styles.ayahTafsirArabic, { color: C.text, fontFamily: arabicFontFamily }]}>
+                      {ayahTranslationSheet.arabic}
+                    </Text>
+                  </View>
+
+                  <View style={[styles.ayahTafsirSourceNote, { backgroundColor: `${C.primary}10`, borderColor: `${C.primary}28` }]}>
+                    <Ionicons name="cloud-outline" size={14} color={C.primary} />
+                    <Text style={{ color: C.textSecondary, fontSize: 11, lineHeight: 17, flex: 1, marginLeft: 8 }}>
+                      {t('ayah_translation_source_note')}
+                    </Text>
+                  </View>
+
+                  {ayahTranslationSheet.loading ? (
+                    <View style={styles.ayahTafsirLoading}>
+                      <ActivityIndicator size="small" color={C.primary} />
+                      <Text style={{ color: C.textMuted, fontSize: FontSize.sm, marginTop: 8 }}>
+                        {t('loading_qf_verses')}
+                      </Text>
+                    </View>
+                  ) : ayahTranslationSheet.error ? (
+                    <Text style={{ color: C.error, fontSize: FontSize.sm, lineHeight: 21 }}>
+                      {ayahTranslationSheet.error}
+                    </Text>
+                  ) : (
+                    <View style={{ gap: 10 }}>
+                      {ayahTranslationSheet.items.map(item => (
+                        <View key={`${ayahTranslationSheet.verseKey}-translation-${item.id}`} style={[styles.translationCompareCard, { backgroundColor: C.card, borderColor: C.border }]}>
+                          <View style={styles.translationCompareHeader}>
+                            <Text style={{ color: C.text, fontSize: FontSize.sm, fontWeight: '800', flex: 1 }} numberOfLines={1}>
+                              {item.name}
+                            </Text>
+                            <View style={[styles.translationCompareBadge, { backgroundColor: `${C.primary}14`, borderColor: `${C.primary}30` }]}>
+                              <Text style={{ color: C.primary, fontSize: 9, fontWeight: '800' }}>
+                                {item.language}
+                              </Text>
+                            </View>
+                          </View>
+                          <Text style={{ color: C.textSecondary, fontSize: FontSize.sm, lineHeight: 22, marginTop: 8 }}>
+                            {item.text}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+                </ScrollView>
+              </>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
+
       {/* â"€â"€ Floating Surah Player Bar â"€â"€ */}
       {isPlayingSurah && (
         <View style={[styles.surahPlayerBar, { backgroundColor: C.surface, borderTopColor: C.border }]}>
           {/* Prev */}
           <TouchableOpacity
             onPress={() => playAyahAt(currentSurahIdxRef.current - 1)}
-            disabled={isSurahOnlyReciter || currentSurahIdxRef.current === 0}
-            style={[styles.spBtn, { opacity: isSurahOnlyReciter || currentSurahIdxRef.current === 0 ? 0.3 : 1 }]}
+            disabled={pendingFinishAction !== 'none' || isSurahOnlyReciter || currentSurahIdxRef.current === 0}
+            style={[styles.spBtn, { opacity: pendingFinishAction !== 'none' || isSurahOnlyReciter || currentSurahIdxRef.current === 0 ? 0.3 : 1 }]}
           >
             <Ionicons name="play-skip-back" size={20} color={C.primary} />
           </TouchableOpacity>
@@ -4972,9 +5798,9 @@ export default function SurahReaderScreen() {
           {/* Info tengah */}
           <View style={{ flex: 1, alignItems: 'center' }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <View style={[styles.spDot, { backgroundColor: isSurahPaused ? C.gold : C.primary }]} />
+              <View style={[styles.spDot, { backgroundColor: pendingFinishAction !== 'none' ? C.gold : isSurahPaused ? C.gold : C.primary }]} />
               <Text style={{ color: C.text, fontSize: FontSize.sm, fontWeight: '700' }}>
-                {isSurahPaused ? t('paused') : t('playing')}
+                {pendingFinishAction !== 'none' ? t('finishing_ayah') : isSurahPaused ? t('paused') : t('playing')}
               </Text>
             </View>
             <Text style={{ color: C.textMuted, fontSize: 10, marginTop: 2 }}>
@@ -4989,8 +5815,8 @@ export default function SurahReaderScreen() {
           {/* Next */}
           <TouchableOpacity
             onPress={() => playAyahAt(currentSurahIdxRef.current + 1)}
-            disabled={isSurahOnlyReciter || !surah || currentSurahIdxRef.current >= (surah.arabic.ayahs.length - 1)}
-            style={[styles.spBtn, { opacity: isSurahOnlyReciter || !surah || currentSurahIdxRef.current >= (surah.arabic.ayahs.length - 1) ? 0.3 : 1 }]}
+            disabled={pendingFinishAction !== 'none' || isSurahOnlyReciter || !surah || currentSurahIdxRef.current >= (surah.arabic.ayahs.length - 1)}
+            style={[styles.spBtn, { opacity: pendingFinishAction !== 'none' || isSurahOnlyReciter || !surah || currentSurahIdxRef.current >= (surah.arabic.ayahs.length - 1) ? 0.3 : 1 }]}
           >
             <Ionicons name="play-skip-forward" size={20} color={C.primary} />
           </TouchableOpacity>
@@ -4998,17 +5824,22 @@ export default function SurahReaderScreen() {
           {/* Pause / Resume */}
           <TouchableOpacity
             onPress={() => isSurahPaused ? resumeSurahPlayback() : pauseSurahPlayback()}
-            style={[styles.spBtn, { backgroundColor: isSurahPaused ? C.primaryMuted : C.surface }]}
+            disabled={pendingFinishAction !== 'none'}
+            style={[styles.spBtn, { backgroundColor: isSurahPaused ? C.primaryMuted : C.surface, opacity: pendingFinishAction !== 'none' ? 0.55 : 1 }]}
           >
             <Ionicons
-              name={isSurahPaused ? 'play' : 'pause'}
+              name={pendingFinishAction !== 'none' ? 'hourglass-outline' : isSurahPaused ? 'play' : 'pause'}
               size={18}
               color={isSurahPaused ? C.primary : C.textSecondary}
             />
           </TouchableOpacity>
 
           {/* Stop */}
-          <TouchableOpacity onPress={stopSurahPlayback} style={[styles.spBtn, styles.spStopBtn, { backgroundColor: '#FF3B3015' }]}>
+          <TouchableOpacity
+            onPress={stopSurahPlayback}
+            disabled={pendingFinishAction !== 'none'}
+            style={[styles.spBtn, styles.spStopBtn, { backgroundColor: '#FF3B3015', opacity: pendingFinishAction !== 'none' ? 0.55 : 1 }]}
+          >
             <Ionicons name="stop" size={18} color="#FF3B30" />
           </TouchableOpacity>
         </View>
@@ -5921,6 +6752,144 @@ const styles = StyleSheet.create({
     backgroundColor: '#FF000015',
     alignItems: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
+  },
+  ayahTafsirSheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '88%',
+    paddingTop: Spacing.sm,
+    overflow: 'hidden',
+  },
+  ayahTafsirHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: Spacing.lg,
+    paddingBottom: Spacing.md,
+  },
+  ayahTafsirIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  ayahTafsirScroll: {
+    paddingHorizontal: Spacing.lg,
+    paddingBottom: 36,
+  },
+  ayahTafsirVerseBox: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
+  },
+  ayahTafsirArabic: {
+    fontSize: 24,
+    lineHeight: 44,
+    textAlign: 'right',
+    writingDirection: 'rtl',
+  },
+  ayahTafsirSourceNote: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    borderWidth: 1,
+    borderRadius: BorderRadius.md,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: Spacing.md,
+  },
+  ayahTafsirLoading: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.xl,
+  },
+  ayahTafsirBodyText: {
+    fontSize: FontSize.sm,
+    lineHeight: 22,
+    marginTop: 10,
+  },
+  ayahTafsirSourceBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderRadius: BorderRadius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    marginTop: Spacing.md,
+  },
+  qfAudioSection: {
+    marginBottom: Spacing.md,
+  },
+  qfAudioHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  qfAudioLoading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  qfAudioReciterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: BorderRadius.lg,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  qfAudioPlayIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  ayahDetailGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  ayahDetailItem: {
+    width: '31.8%',
+    minWidth: 94,
+    borderWidth: 1,
+    borderRadius: BorderRadius.lg,
+    paddingHorizontal: 10,
+    paddingVertical: 11,
+  },
+  ayahDetailSajdahBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.md,
+    marginTop: Spacing.md,
+  },
+  translationCompareCard: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.md,
+  },
+  translationCompareHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  translationCompareBadge: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.full,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
     flexShrink: 0,
   },
   bookmarkEmptyBox: {

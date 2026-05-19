@@ -1,13 +1,14 @@
-// Quran Foundation OAuth 2.0 + User API
-// Docs: https://api-docs.quran.foundation/docs/tutorials/oidc/user-apis-quickstart/
+// Quran Foundation OAuth 2.0 + User API.
+// The mobile app uses Quran.com hosted login, then sends token exchange,
+// refresh, and User API calls through the MuslimMate backend proxy.
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const QF_OAUTH_BASE = 'https://prelive-oauth2.quran.foundation';
-const QF_API_BASE = 'https://apis-prelive.quran.foundation';
+const QF_OAUTH_BASE =
+  process.env.EXPO_PUBLIC_QF_OAUTH_BASE ?? 'https://prelive-oauth2.quran.foundation';
+const QF_PROXY_BASE_URL = (process.env.EXPO_PUBLIC_QF_PROXY_BASE_URL ?? '').replace(/\/+$/, '');
 
 export const QF_CLIENT_ID = process.env.EXPO_PUBLIC_QF_CLIENT_ID ?? '';
-const QF_CLIENT_SECRET = process.env.EXPO_PUBLIC_QF_CLIENT_SECRET ?? '';
 
 export const QF_DISCOVERY = {
   authorizationEndpoint: `${QF_OAUTH_BASE}/oauth2/auth`,
@@ -22,6 +23,9 @@ const USER_KEY = '@qf_user_info';
 export interface QFTokens {
   accessToken: string;
   refreshToken?: string;
+  idToken?: string;
+  tokenType?: string;
+  scope?: string;
   expiresAt: number;
 }
 
@@ -40,7 +44,36 @@ export interface QFBookmark {
   created_at: string;
 }
 
-// ── Token Storage ──────────────────────────────────────────────────
+export function isQFProxyConfigured(): boolean {
+  return Boolean(QF_CLIENT_ID && QF_PROXY_BASE_URL);
+}
+
+function assertQFProxyConfigured(): void {
+  if (!QF_CLIENT_ID) throw new Error('EXPO_PUBLIC_QF_CLIENT_ID belum dikonfigurasi.');
+  if (!QF_PROXY_BASE_URL) throw new Error('EXPO_PUBLIC_QF_PROXY_BASE_URL belum dikonfigurasi.');
+}
+
+async function proxyPost<T>(
+  path: string,
+  body: Record<string, unknown>,
+  accessToken?: string
+): Promise<T> {
+  assertQFProxyConfigured();
+  const res = await fetch(`${QF_PROXY_BASE_URL}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.error ?? `QF proxy ${res.status}: ${path}`);
+  }
+  return res.json();
+}
 
 export async function saveQFTokens(tokens: QFTokens): Promise<void> {
   await AsyncStorage.setItem(TOKENS_KEY, JSON.stringify(tokens));
@@ -56,6 +89,7 @@ export async function clearQFSession(): Promise<void> {
 }
 
 export async function isQFLoggedIn(): Promise<boolean> {
+  if (!isQFProxyConfigured()) return false;
   const tokens = await loadQFTokens();
   if (!tokens) return false;
   if (Date.now() < tokens.expiresAt - 60_000) return true;
@@ -71,67 +105,40 @@ export async function isQFLoggedIn(): Promise<boolean> {
   return false;
 }
 
-// ── OAuth Token Exchange ───────────────────────────────────────────
+export async function getQFSessionStatus(): Promise<{
+  configured: boolean;
+  loggedIn: boolean;
+  expiresAt?: number;
+  scope?: string;
+}> {
+  const configured = isQFProxyConfigured();
+  if (!configured) return { configured, loggedIn: false };
+  const tokens = await loadQFTokens();
+  const loggedIn = await isQFLoggedIn();
+  const refreshed = await loadQFTokens();
+  return {
+    configured,
+    loggedIn,
+    expiresAt: refreshed?.expiresAt ?? tokens?.expiresAt,
+    scope: refreshed?.scope ?? tokens?.scope,
+  };
+}
 
 export async function exchangeQFCode(
   code: string,
   codeVerifier: string,
   redirectUri: string
 ): Promise<QFTokens> {
-  const params = new URLSearchParams({
-    grant_type: 'authorization_code',
+  return proxyPost<QFTokens>('/oauth/exchange', {
     code,
-    redirect_uri: redirectUri,
-    code_verifier: codeVerifier,
-    client_id: QF_CLIENT_ID,
+    codeVerifier,
+    redirectUri,
   });
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/x-www-form-urlencoded',
-  };
-  if (QF_CLIENT_SECRET) {
-    headers['Authorization'] = `Basic ${btoa(`${QF_CLIENT_ID}:${QF_CLIENT_SECRET}`)}`;
-  }
-
-  const res = await fetch(QF_DISCOVERY.tokenEndpoint, {
-    method: 'POST',
-    headers,
-    body: params.toString(),
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Token exchange failed: ${err}`);
-  }
-  const data = await res.json();
-  return {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token,
-    expiresAt: Date.now() + data.expires_in * 1000,
-  };
 }
 
 export async function refreshQFToken(refreshToken: string): Promise<QFTokens> {
-  const params = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-    client_id: QF_CLIENT_ID,
-    ...(QF_CLIENT_SECRET ? { client_secret: QF_CLIENT_SECRET } : {}),
-  });
-  const res = await fetch(QF_DISCOVERY.tokenEndpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString(),
-  });
-  if (!res.ok) throw new Error('Token refresh failed');
-  const data = await res.json();
-  return {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token ?? refreshToken,
-    expiresAt: Date.now() + data.expires_in * 1000,
-  };
+  return proxyPost<QFTokens>('/oauth/refresh', { refreshToken });
 }
-
-// ── User API ───────────────────────────────────────────────────────
 
 async function getValidToken(): Promise<string> {
   let tokens = await loadQFTokens();
@@ -142,28 +149,30 @@ async function getValidToken(): Promise<string> {
     await saveQFTokens(tokens);
     return tokens.accessToken;
   }
-  throw new Error('Session expired — please log in again');
+  throw new Error('Session expired. Please log in again.');
 }
 
 async function userFetch(path: string, options?: RequestInit) {
+  assertQFProxyConfigured();
   const token = await getValidToken();
-  const res = await fetch(`${QF_API_BASE}${path}`, {
+  const res = await fetch(`${QF_PROXY_BASE_URL}${path}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
       ...(options?.headers ?? {}),
-      'x-auth-token': token,
-      'x-client-id': QF_CLIENT_ID,
+      Authorization: `Bearer ${token}`,
     },
   });
-  if (!res.ok) throw new Error(`User API ${res.status}: ${path}`);
+
+  if (!res.ok) throw new Error(`QF User API ${res.status}: ${path}`);
   if (res.status === 204) return null;
-  return res.json();
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
 export async function fetchQFBookmarks(): Promise<QFBookmark[]> {
-  const data = await userFetch('/auth/v1/bookmarks');
-  return data?.bookmarks ?? data ?? [];
+  const data = await userFetch('/user/bookmarks');
+  return data?.bookmarks ?? data?.data ?? data ?? [];
 }
 
 export async function addQFBookmark(
@@ -171,18 +180,18 @@ export async function addQFBookmark(
   surahId: number,
   verseNumber: number
 ): Promise<void> {
-  await userFetch('/auth/v1/bookmarks', {
+  await userFetch('/user/bookmarks', {
     method: 'POST',
     body: JSON.stringify({ verse_key: verseKey, mushaf_id: 1, surah_id: surahId, verse_number: verseNumber }),
   });
 }
 
 export async function deleteQFBookmark(bookmarkId: number): Promise<void> {
-  await userFetch(`/auth/v1/bookmarks/${bookmarkId}`, { method: 'DELETE' });
+  await userFetch(`/user/bookmarks/${bookmarkId}`, { method: 'DELETE' });
 }
 
 export async function logQFReadingSession(verseKey: string, durationSeconds: number): Promise<void> {
-  await userFetch('/auth/v1/reading_sessions', {
+  await userFetch('/user/reading-sessions', {
     method: 'POST',
     body: JSON.stringify({ verse_key: verseKey, duration: durationSeconds }),
   });

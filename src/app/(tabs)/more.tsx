@@ -12,6 +12,7 @@ import {
   Image,
   TextInput,
   ActivityIndicator,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
@@ -35,6 +36,8 @@ interface DonationMethod {
   number: string;
   color: string;
 }
+
+const CONTACT_EMAIL = process.env.EXPO_PUBLIC_SUPPORT_EMAIL ?? 'support@muslimmate.app';
 
 const DONATION_METHODS: DonationMethod[] = [
   {
@@ -70,7 +73,19 @@ type MoreCopy = {
   toolsSection: string;
   supportSection: string;
   languageHint: string;
-  donationActionDesc: string;
+  contactActionTitle: string;
+  contactActionDesc: string;
+  contactModalTitle: string;
+  contactModalDesc: string;
+  contactEmailTitle: string;
+  contactEmailDesc: string;
+  contactWhatsappTitle: string;
+  contactWhatsappDesc: string;
+  contactUnavailableBadge: string;
+  contactWhatsappDevTitle: string;
+  contactWhatsappDevMessage: string;
+  contactOpenFailedTitle: string;
+  contactOpenFailedMessage: string;
   supportFormActionTitle: string;
   supportFormActionDesc: string;
   supportFormTitle: string;
@@ -103,7 +118,19 @@ const MORE_TEXT: Record<Lang, MoreCopy> = {
     toolsSection: 'Alat Pendukung',
     supportSection: 'Bantuan & Dukungan',
     languageHint: 'Bahasa aplikasi',
-    donationActionDesc: 'Bantu server, riset, dan pengembangan fitur',
+    contactActionTitle: 'Kontak',
+    contactActionDesc: 'Hubungi developer via email atau WhatsApp',
+    contactModalTitle: 'Kontak MuslimMate',
+    contactModalDesc: 'Pilih kanal yang ingin kamu gunakan untuk menghubungi developer.',
+    contactEmailTitle: 'Email',
+    contactEmailDesc: 'Kirim pesan ke email developer',
+    contactWhatsappTitle: 'WhatsApp',
+    contactWhatsappDesc: 'Masih dalam proses persiapan WhatsApp Business',
+    contactUnavailableBadge: 'Dalam pengembangan',
+    contactWhatsappDevTitle: 'WhatsApp Belum Tersedia',
+    contactWhatsappDevMessage: 'Kontak WhatsApp masih dalam tahap pengembangan. Silakan gunakan email terlebih dahulu.',
+    contactOpenFailedTitle: 'Gagal Membuka Email',
+    contactOpenFailedMessage: 'Aplikasi email belum tersedia di perangkat ini.',
     supportFormActionTitle: 'Form Support',
     supportFormActionDesc: 'Kirim masukan dan info donasi',
     supportFormTitle: 'Form Support MuslimMate',
@@ -134,7 +161,19 @@ const MORE_TEXT: Record<Lang, MoreCopy> = {
     toolsSection: 'Supporting Tools',
     supportSection: 'Help & Support',
     languageHint: 'App language',
-    donationActionDesc: 'Support servers, research, and feature development',
+    contactActionTitle: 'Contact',
+    contactActionDesc: 'Reach the developer by email or WhatsApp',
+    contactModalTitle: 'Contact MuslimMate',
+    contactModalDesc: 'Choose how you would like to contact the developer.',
+    contactEmailTitle: 'Email',
+    contactEmailDesc: 'Send a message to the developer email',
+    contactWhatsappTitle: 'WhatsApp',
+    contactWhatsappDesc: 'WhatsApp Business is still being prepared',
+    contactUnavailableBadge: 'In development',
+    contactWhatsappDevTitle: 'WhatsApp Not Available',
+    contactWhatsappDevMessage: 'WhatsApp contact is still under development. Please use email for now.',
+    contactOpenFailedTitle: 'Could Not Open Email',
+    contactOpenFailedMessage: 'No email app is available on this device.',
     supportFormActionTitle: 'Support Form',
     supportFormActionDesc: 'Send feedback and donation info',
     supportFormTitle: 'MuslimMate Support Form',
@@ -165,7 +204,7 @@ export default function MoreScreen() {
   const C = Colors[scheme];
   const { t, lang, setLang } = useTranslation();
   const copy = MORE_TEXT[lang];
-  const [showDonation, setShowDonation] = useState(false);
+  const [showContact, setShowContact] = useState(false);
   const [showSupportForm, setShowSupportForm] = useState(false);
   const [showDonationMethodOptions, setShowDonationMethodOptions] = useState(false);
   const [supportName, setSupportName] = useState('');
@@ -240,6 +279,28 @@ export default function MoreScreen() {
     } finally {
       setSupportSubmitting(false);
     }
+  };
+
+  const handleOpenEmail = async () => {
+    const subject = encodeURIComponent(lang === 'en' ? 'Contact MuslimMate' : 'Kontak MuslimMate');
+    const url = `mailto:${CONTACT_EMAIL}?subject=${subject}`;
+
+    try {
+      const supported = await Linking.canOpenURL(url);
+      if (!supported) {
+        Alert.alert(copy.contactOpenFailedTitle, copy.contactOpenFailedMessage);
+        return;
+      }
+
+      await Linking.openURL(url);
+      setShowContact(false);
+    } catch {
+      Alert.alert(copy.contactOpenFailedTitle, copy.contactOpenFailedMessage);
+    }
+  };
+
+  const showWhatsappDevelopmentAlert = () => {
+    Alert.alert(copy.contactWhatsappDevTitle, copy.contactWhatsappDevMessage);
   };
 
   const QUICK_ITEMS = [
@@ -325,12 +386,12 @@ export default function MoreScreen() {
       onPress: () => setShowSupportForm(true),
     },
     {
-      id: 'donation',
-      icon: 'heart-outline' as const,
-      title: t('support_title'),
-      description: copy.donationActionDesc,
+      id: 'contact',
+      icon: 'mail-outline' as const,
+      title: copy.contactActionTitle,
+      description: copy.contactActionDesc,
       color: C.gold,
-      onPress: () => setShowDonation(true),
+      onPress: () => setShowContact(true),
     },
   ];
 
@@ -491,7 +552,7 @@ export default function MoreScreen() {
                         {item.description}
                       </Text>
                     </View>
-                    <Ionicons name={item.id === 'donation' ? 'heart' : 'arrow-forward'} size={16} color={item.color} />
+                    <Ionicons name="arrow-forward" size={16} color={item.color} />
                   </TouchableOpacity>
                   {index < SUPPORT_ITEMS.length - 1 && <View style={[styles.dividerInset, { backgroundColor: C.border }]} />}
                 </React.Fragment>
@@ -677,11 +738,11 @@ export default function MoreScreen() {
         </Pressable>
       </Modal>
 
-      {/* ── Modal Donasi ── */}
-      <Modal visible={showDonation} transparent animationType="slide">
+      {/* Contact */}
+      <Modal visible={showContact} transparent animationType="slide" onRequestClose={() => setShowContact(false)}>
         <Pressable
           style={[styles.overlay, { backgroundColor: C.overlay }]}
-          onPress={() => setShowDonation(false)}
+          onPress={() => setShowContact(false)}
         >
           <Pressable
             style={[styles.sheet, { backgroundColor: C.surface }]}
@@ -691,72 +752,69 @@ export default function MoreScreen() {
 
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, marginBottom: Spacing.lg }}>
               <View style={[styles.donateIconBox, { backgroundColor: `${C.gold}20` }]}>
-                <Ionicons name="heart" size={22} color={C.gold} />
+                <Ionicons name="mail-outline" size={22} color={C.gold} />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={{ color: C.text, fontSize: FontSize.lg, fontWeight: '800' }}>
-                  {t('donation_title')}
+                  {copy.contactModalTitle}
                 </Text>
-                <Text style={{ color: C.textSecondary, fontSize: FontSize.xs, marginTop: 2 }}>
-                  {t('choose_payment')}
+                <Text style={{ color: C.textSecondary, fontSize: FontSize.xs, marginTop: 2, lineHeight: 17 }}>
+                  {copy.contactModalDesc}
                 </Text>
               </View>
-              <TouchableOpacity onPress={() => setShowDonation(false)} hitSlop={8}>
+              <TouchableOpacity onPress={() => setShowContact(false)} hitSlop={8}>
                 <Ionicons name="close" size={22} color={C.textMuted} />
               </TouchableOpacity>
             </View>
 
             <View style={{ gap: Spacing.sm }}>
-              {DONATION_METHODS.map((method, i) => {
-                const isCopied = copiedKey === `${i}`;
-                return (
-                  <View
-                    key={i}
-                    style={[styles.donationCard, { backgroundColor: C.card, borderColor: C.border }]}
-                  >
-                    <View style={[styles.methodIcon, { backgroundColor: `${method.color}15` }]}>
-                      <Ionicons name={method.icon} size={20} color={method.color} />
-                    </View>
-                    <View style={{ flex: 1, marginLeft: Spacing.sm }}>
-                      <Text style={{ color: C.textMuted, fontSize: 10, fontWeight: '600' }}>
-                        {method.label === 'E-Wallet Lainnya' ? copy.ewalletOther : method.label}
-                      </Text>
-                      <Text style={{ color: C.text, fontSize: FontSize.md, fontWeight: '800', letterSpacing: 0.5 }}>
-                        {method.number}
-                      </Text>
-                      <Text style={{ color: C.textSecondary, fontSize: 11 }}>
-                        a.n. {method.name}
-                      </Text>
-                    </View>
-                    <TouchableOpacity
-                      onPress={() => copyToClipboard(method.number, `${i}`)}
-                      style={[
-                        styles.copyBtn,
-                        {
-                          backgroundColor: isCopied ? '#10B98120' : C.primaryMuted,
-                          borderColor: isCopied ? '#10B981' : C.primary,
-                        },
-                      ]}
-                    >
-                      <Ionicons
-                        name={isCopied ? 'checkmark' : 'copy-outline'}
-                        size={14}
-                        color={isCopied ? '#10B981' : C.primary}
-                      />
-                      <Text style={{ color: isCopied ? '#10B981' : C.primary, fontSize: 10, fontWeight: '700', marginLeft: 3 }}>
-                        {isCopied ? t('copied') : t('copy')}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                );
-              })}
-            </View>
+              <TouchableOpacity
+                onPress={handleOpenEmail}
+                activeOpacity={0.8}
+                style={[styles.contactCard, { backgroundColor: C.card, borderColor: C.border }]}
+              >
+                <View style={[styles.methodIcon, { backgroundColor: '#3B82F615' }]}>
+                  <Ionicons name="mail-outline" size={20} color="#3B82F6" />
+                </View>
+                <View style={{ flex: 1, marginLeft: Spacing.sm }}>
+                  <Text style={{ color: C.text, fontSize: FontSize.md, fontWeight: '800' }}>
+                    {copy.contactEmailTitle}
+                  </Text>
+                  <Text style={{ color: C.textSecondary, fontSize: FontSize.xs, marginTop: 2 }}>
+                    {copy.contactEmailDesc}
+                  </Text>
+                  <Text style={{ color: C.primary, fontSize: FontSize.xs, fontWeight: '700', marginTop: 4 }} numberOfLines={1}>
+                    {CONTACT_EMAIL}
+                  </Text>
+                </View>
+                <Ionicons name="open-outline" size={17} color="#3B82F6" />
+              </TouchableOpacity>
 
-            <View style={[styles.donationNote, { backgroundColor: `${C.gold}10`, borderColor: `${C.gold}25` }]}>
-              <Ionicons name="information-circle-outline" size={14} color={C.gold} />
-              <Text style={{ color: C.textSecondary, fontSize: 11, flex: 1, marginLeft: 6, lineHeight: 17 }}>
-                {t('donation_note')}
-              </Text>
+              <TouchableOpacity
+                onPress={showWhatsappDevelopmentAlert}
+                activeOpacity={0.8}
+                style={[styles.contactCard, { backgroundColor: C.card, borderColor: C.border, opacity: 0.72 }]}
+              >
+                <View style={[styles.methodIcon, { backgroundColor: '#10B98115' }]}>
+                  <Ionicons name="logo-whatsapp" size={20} color="#10B981" />
+                </View>
+                <View style={{ flex: 1, marginLeft: Spacing.sm }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                    <Text style={{ color: C.text, fontSize: FontSize.md, fontWeight: '800' }}>
+                      {copy.contactWhatsappTitle}
+                    </Text>
+                    <View style={[styles.statusPill, { backgroundColor: `${C.gold}18`, borderColor: `${C.gold}35` }]}>
+                      <Text style={{ color: C.gold, fontSize: 10, fontWeight: '900' }}>
+                        {copy.contactUnavailableBadge}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text style={{ color: C.textSecondary, fontSize: FontSize.xs, marginTop: 3 }}>
+                    {copy.contactWhatsappDesc}
+                  </Text>
+                </View>
+                <Ionicons name="lock-closed-outline" size={17} color={C.textMuted} />
+              </TouchableOpacity>
             </View>
           </Pressable>
         </Pressable>
@@ -961,12 +1019,18 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     flexDirection: 'row',
   },
-  donationCard: {
+  contactCard: {
     flexDirection: 'row',
     alignItems: 'center',
     borderRadius: BorderRadius.lg,
     borderWidth: 1,
     padding: Spacing.md,
+  },
+  statusPill: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.full,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
   },
   methodIcon: {
     width: 40,
@@ -982,13 +1046,5 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     paddingHorizontal: 10,
     paddingVertical: 6,
-  },
-  donationNote: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    borderRadius: BorderRadius.md,
-    borderWidth: 1,
-    padding: Spacing.sm,
-    marginTop: Spacing.md,
   },
 });
