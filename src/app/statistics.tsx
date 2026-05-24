@@ -44,6 +44,7 @@ const STAT_TEXT: Record<Lang, Record<string, string>> = {
   },
 };
 
+
 const DAY_LABELS: Record<Lang, string[]> = {
   id: ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'],
   en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],

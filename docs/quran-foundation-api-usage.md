@@ -61,6 +61,10 @@ OAuth and User APIs:
 - `POST /user/bookmarks`
 - `DELETE /user/bookmarks/:id`
 - `POST /user/reading-sessions`
+- `GET /user/notes/by-verse?verseKey=...`
+- `POST /user/notes`
+- `PATCH /user/notes/:id`
+- `DELETE /user/notes/:id`
 
 Content APIs:
 
@@ -99,6 +103,7 @@ MuslimMate uses Quran Foundation User APIs through `src/services/quranFoundation
 | OAuth login | Quran.com hosted login with PKCE. |
 | Bookmark | Quran reader syncs saved verse bookmarks to Quran.com when the user is logged in. |
 | Reading session | Quran reader logs reading sessions when the user opens/continues an ayah. |
+| Notes | Ayah action menu lets the user save tadabbur notes, study insights, reminders, and quotes locally, then syncs eligible notes to Quran.Foundation when logged in. |
 | Sync visibility | Login screen and More tab show Quran.com connection status. |
 
 ## Submission Summary
@@ -109,6 +114,7 @@ MuslimMate integrates Quran Foundation APIs to help users build a daily Quran ha
 - Search the Quran by emotion or topic using Quran Foundation Search API.
 - Open Quran results directly in the reader.
 - Sync Quran.com bookmarks and reading sessions via User APIs.
+- Save personal notes per ayah locally and sync them through Quran.Foundation Notes API when available.
 - Keep Quran Foundation credentials safe by routing all secret-backed requests through a backend proxy.
 
 ## Files Involved

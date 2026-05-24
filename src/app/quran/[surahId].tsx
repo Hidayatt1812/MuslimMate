@@ -70,17 +70,29 @@ import {
 } from '@/services/quranFoundationService';
 import {
   addBookmark,
+  deleteQuranAyahNote,
   getBookmarks,
+  getQuranAyahNotesByVerse,
   getItem,
   removeBookmark,
+  recordQuranReadingActivity,
+  saveQuranAyahNote,
   setItem,
   setLastRead,
+  upsertQuranAyahNotes,
   type BookmarkItem,
+  type QuranAyahNote,
+  type QuranAyahNoteCategory,
 } from '@/services/storageService';
 import {
   isQFLoggedIn,
   addQFBookmark,
+  addQFNote,
+  deleteQFNote,
+  fetchQFNotesByVerse,
   logQFReadingSession,
+  updateQFNote,
+  type QFNote,
 } from '@/services/quranFoundationAuthService';
 import {
   downloadReciterAudioOfflineForSurah,
@@ -157,9 +169,31 @@ type AyahDetailSheetState = {
   translation: string;
   ayah: Ayah;
 };
+type AyahActionMenuState = {
+  ayah: Ayah;
+  surahNumber: number;
+  ayahNumber: number;
+  surahName: string;
+  arabic: string;
+  translation: string;
+};
+type AyahNotesSheetState = AyahActionMenuState & {
+  verseKey: string;
+  notes: QuranAyahNote[];
+  loading: boolean;
+  error: string | null;
+  syncNotice: string | null;
+};
 
 const STORAGE_KEY = 'muslimmate_quran_prefs';
 const DEFAULT_TAFSIR_ID = 169;
+
+const NOTE_CATEGORY_OPTIONS: { id: QuranAyahNoteCategory; icon: keyof typeof Ionicons.glyphMap }[] = [
+  { id: 'tadabbur', icon: 'leaf-outline' },
+  { id: 'kajian', icon: 'school-outline' },
+  { id: 'reminder', icon: 'notifications-outline' },
+  { id: 'quote', icon: 'chatbox-ellipses-outline' },
+];
 
 const MODE_OPTIONS: { id: DisplayMode; icon: keyof typeof Ionicons.glyphMap; label: string; desc: string }[] = [
   { id: 'normal',  icon: 'book-outline',         label: 'Normal',  desc: 'Tampilan standar dengan bookmark & asbabun nuzul' },
@@ -1397,6 +1431,13 @@ export default function SurahReaderScreen() {
   const [ayahTafsirSheet, setAyahTafsirSheet] = useState<AyahTafsirSheetState | null>(null);
   const [ayahTranslationSheet, setAyahTranslationSheet] = useState<AyahTranslationSheetState | null>(null);
   const [ayahDetailSheet, setAyahDetailSheet] = useState<AyahDetailSheetState | null>(null);
+  const [ayahActionMenu, setAyahActionMenu] = useState<AyahActionMenuState | null>(null);
+  const [ayahNotesSheet, setAyahNotesSheet] = useState<AyahNotesSheetState | null>(null);
+  const [noteDraft, setNoteDraft] = useState('');
+  const [noteCategory, setNoteCategory] = useState<QuranAyahNoteCategory>('tadabbur');
+  const [noteSource, setNoteSource] = useState('');
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+  const [noteSaving, setNoteSaving] = useState(false);
   const [qfAudioReciters, setQFAudioReciters] = useState<QFAudioReciter[]>([]);
   const [qfAudioRecitersLoading, setQFAudioRecitersLoading] = useState(false);
   const [qfAudioRecitersError, setQFAudioRecitersError] = useState<string | null>(null);
@@ -1437,6 +1478,7 @@ export default function SurahReaderScreen() {
   const surahDataRef = useRef(surah);
   const playbackRequestRef = useRef(0);
   const autoPlayHandledRef = useRef<string | null>(null);
+  const lastTrackedReadingRef = useRef<{ key: string; at: number } | null>(null);
   const isNavigatingRef = useRef(false);
   const slideAnim = useRef(new Animated.Value(0)).current;
   const ayahHighlightAnim = useRef(new Animated.Value(0)).current;
@@ -1585,6 +1627,19 @@ export default function SurahReaderScreen() {
     setAyahDetailSheet(null);
   }, []);
 
+  const closeAyahActionMenu = useCallback(() => {
+    setAyahActionMenu(null);
+  }, []);
+
+  const closeAyahNotes = useCallback(() => {
+    setAyahNotesSheet(null);
+    setNoteDraft('');
+    setNoteSource('');
+    setNoteCategory('tadabbur');
+    setEditingNoteId(null);
+    setNoteSaving(false);
+  }, []);
+
   const loadQFAudioReciters = useCallback(async () => {
     if (qfAudioRecitersLoading) return;
     setQFAudioRecitersLoading(true);
@@ -1633,6 +1688,100 @@ export default function SurahReaderScreen() {
       ayah,
     });
   }, [num]);
+
+  const openAyahActionMenu = useCallback((
+    ayah: Ayah,
+    arabicText: string,
+    translationText: string,
+    targetSurahNumber = num,
+    targetSurahName?: string
+  ) => {
+    const fallbackSurahName =
+      targetSurahName ??
+      SURAH_LIST.find(s => s.number === targetSurahNumber)?.englishName ??
+      `Surah ${targetSurahNumber}`;
+
+    setAyahActionMenu({
+      ayah,
+      surahNumber: targetSurahNumber,
+      ayahNumber: ayah.numberInSurah,
+      surahName: fallbackSurahName,
+      arabic: arabicText,
+      translation: translationText,
+    });
+  }, [num]);
+
+  const getNoteCategoryLabel = useCallback((category: QuranAyahNoteCategory) => {
+    if (category === 'kajian') return t('note_category_kajian');
+    if (category === 'reminder') return t('note_category_reminder');
+    if (category === 'quote') return t('note_category_quote');
+    return t('note_category_tadabbur');
+  }, [t]);
+
+  const mapQFNoteToLocal = useCallback((note: QFNote, target: AyahActionMenuState): QuranAyahNote => ({
+    id: `qf_${note.id}`,
+    qfNoteId: note.id,
+    verseKey: `${target.surahNumber}:${target.ayahNumber}`,
+    surahNumber: target.surahNumber,
+    surahName: target.surahName,
+    ayahNumber: target.ayahNumber,
+    arabic: target.arabic,
+    translation: target.translation,
+    body: note.body,
+    category: 'tadabbur',
+    source: note.source,
+    syncStatus: 'synced',
+    createdAt: note.createdAt,
+    updatedAt: note.updatedAt,
+  }), []);
+
+  const loadAyahNotes = useCallback(async (target: AyahActionMenuState) => {
+    const verseKey = `${target.surahNumber}:${target.ayahNumber}`;
+    setAyahNotesSheet(prev => prev?.verseKey === verseKey ? { ...prev, loading: true, error: null } : prev);
+    try {
+      const localNotes = await getQuranAyahNotesByVerse(verseKey);
+      setAyahNotesSheet(prev => prev?.verseKey === verseKey ? { ...prev, notes: localNotes, loading: false } : prev);
+
+      const loggedIn = await isQFLoggedIn();
+      if (!loggedIn) return;
+
+      const qfNotes = await fetchQFNotesByVerse(verseKey);
+      if (!qfNotes.length) return;
+      const imported = qfNotes.map(note => mapQFNoteToLocal(note, target));
+      const allNotes = await upsertQuranAyahNotes(imported);
+      setAyahNotesSheet(prev => prev?.verseKey === verseKey ? {
+        ...prev,
+        notes: allNotes.filter(note => note.verseKey === verseKey),
+        loading: false,
+        syncNotice: t('note_qf_synced'),
+      } : prev);
+    } catch {
+      setAyahNotesSheet(prev => prev?.verseKey === verseKey ? {
+        ...prev,
+        loading: false,
+        error: prev.notes.length ? null : t('note_load_failed'),
+        syncNotice: t('note_load_failed'),
+      } : prev);
+    }
+  }, [mapQFNoteToLocal, t]);
+
+  const openAyahNotes = useCallback((target: AyahActionMenuState) => {
+    const verseKey = `${target.surahNumber}:${target.ayahNumber}`;
+    setAyahActionMenu(null);
+    setNoteDraft('');
+    setNoteSource('');
+    setNoteCategory('tadabbur');
+    setEditingNoteId(null);
+    setAyahNotesSheet({
+      ...target,
+      verseKey,
+      notes: [],
+      loading: true,
+      error: null,
+      syncNotice: null,
+    });
+    loadAyahNotes(target).catch(() => {});
+  }, [loadAyahNotes]);
 
   const pickAyahTafsirText = useCallback((full: UlamaTafsirFullInsight | null, qfText: string) => {
     if (lang === 'id') {
@@ -2323,8 +2472,9 @@ export default function SurahReaderScreen() {
   const unloadCurrentSound = useCallback(async () => {
     const current = soundRef.current;
     soundRef.current = null;
-    quranAudioService.detach();
+    quranAudioService.stop();
     if (!current) return;
+    try { current.pause(); } catch {}
     try { current.clearLockScreenControls(); } catch {}
     try { current.remove(); } catch {}
   }, []);
@@ -2756,6 +2906,161 @@ export default function SurahReaderScreen() {
     setActiveAyahWordIndex(prev => (prev === wordIndex ? prev : wordIndex));
   }, []);
 
+  const trackReadingProgress = useCallback(async (
+    ayahNumberInSurah: number,
+    targetSurahNumber = num,
+    targetSurahName?: string,
+    pageNumber?: number
+  ) => {
+    if (!Number.isFinite(ayahNumberInSurah) || ayahNumberInSurah <= 0) return;
+    const nowMs = Date.now();
+    const key = `${targetSurahNumber}:${ayahNumberInSurah}`;
+    const last = lastTrackedReadingRef.current;
+    if (last?.key === key && nowMs - last.at < 12000) return;
+    lastTrackedReadingRef.current = { key, at: nowMs };
+    const surahName =
+      targetSurahName ??
+      (targetSurahNumber === num ? surahMeta?.englishName ?? surahDataRef.current?.arabic.englishName : undefined) ??
+      SURAH_LIST.find(s => s.number === targetSurahNumber)?.englishName ??
+      `Surah ${targetSurahNumber}`;
+    const readAt = new Date(nowMs).toISOString();
+
+    await setLastRead({
+      surahNumber: targetSurahNumber,
+      surahName,
+      ayahNumber: ayahNumberInSurah,
+      readAt,
+    });
+
+    await recordQuranReadingActivity({
+      surahNumber: targetSurahNumber,
+      surahName,
+      ayahNumber: ayahNumberInSurah,
+      pageNumber,
+      readAt,
+    });
+
+    isQFLoggedIn().then(loggedIn => {
+      if (loggedIn) {
+        logQFReadingSession(`${targetSurahNumber}:${ayahNumberInSurah}`, 30).catch(() => {});
+      }
+    });
+  }, [num, surahMeta?.englishName]);
+
+  const markAyahAsReadFromMenu = useCallback(async () => {
+    const target = ayahActionMenu;
+    if (!target) return;
+    await trackReadingProgress(target.ayahNumber, target.surahNumber, target.surahName, target.ayah.page);
+    setAyahActionMenu(null);
+    Alert.alert(
+      t('quran_progress_marked_title'),
+      `${target.surahName} - ${t('verse_label')} ${target.ayahNumber}\n${t('quran_progress_marked_message')}`
+    );
+  }, [ayahActionMenu, trackReadingProgress, t]);
+
+  const resetNoteEditor = useCallback(() => {
+    setNoteDraft('');
+    setNoteSource('');
+    setNoteCategory('tadabbur');
+    setEditingNoteId(null);
+  }, []);
+
+  const saveAyahNote = useCallback(async () => {
+    const sheet = ayahNotesSheet;
+    const body = noteDraft.trim();
+    if (!sheet || !body) return;
+
+    setNoteSaving(true);
+    const now = new Date().toISOString();
+    const existing = editingNoteId
+      ? sheet.notes.find(note => note.id === editingNoteId)
+      : null;
+    let nextNote: QuranAyahNote = {
+      id: existing?.id ?? `note_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      verseKey: sheet.verseKey,
+      surahNumber: sheet.surahNumber,
+      surahName: sheet.surahName,
+      ayahNumber: sheet.ayahNumber,
+      arabic: sheet.arabic,
+      translation: sheet.translation,
+      body,
+      category: noteCategory,
+      source: noteSource.trim() || undefined,
+      qfNoteId: existing?.qfNoteId,
+      syncStatus: existing?.qfNoteId ? 'synced' : 'local',
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+
+    try {
+      const loggedIn = await isQFLoggedIn();
+      if (loggedIn && body.length >= 6) {
+        try {
+          const qfNote = nextNote.qfNoteId
+            ? await updateQFNote(nextNote.qfNoteId, body)
+            : await addQFNote(body, sheet.verseKey);
+          if (qfNote?.id) {
+            nextNote = {
+              ...nextNote,
+              id: nextNote.id.startsWith('note_') ? `qf_${qfNote.id}` : nextNote.id,
+              qfNoteId: qfNote.id,
+              syncStatus: 'synced',
+              updatedAt: qfNote.updatedAt || now,
+              createdAt: qfNote.createdAt || nextNote.createdAt,
+            };
+          }
+        } catch {
+          nextNote = { ...nextNote, syncStatus: nextNote.qfNoteId ? 'failed' : 'pending' };
+        }
+      } else if (loggedIn && body.length < 6) {
+        nextNote = { ...nextNote, syncStatus: 'pending' };
+      }
+
+      const notes = await saveQuranAyahNote(nextNote);
+      setAyahNotesSheet(prev => prev?.verseKey === sheet.verseKey ? {
+        ...prev,
+        notes,
+        syncNotice: nextNote.syncStatus === 'synced' ? t('note_qf_synced') : t('note_saved_local'),
+      } : prev);
+      resetNoteEditor();
+    } finally {
+      setNoteSaving(false);
+    }
+  }, [ayahNotesSheet, editingNoteId, noteCategory, noteDraft, noteSource, resetNoteEditor, t]);
+
+  const editAyahNote = useCallback((note: QuranAyahNote) => {
+    setEditingNoteId(note.id);
+    setNoteDraft(note.body);
+    setNoteSource(note.source ?? '');
+    setNoteCategory(note.category);
+  }, []);
+
+  const deleteAyahNote = useCallback((note: QuranAyahNote) => {
+    Alert.alert(
+      t('note_delete_title'),
+      t('note_delete_message'),
+      [
+        { text: t('cancel'), style: 'cancel' },
+        {
+          text: t('delete'),
+          style: 'destructive',
+          onPress: async () => {
+            await deleteQuranAyahNote(note.id);
+            if (note.qfNoteId) {
+              deleteQFNote(note.qfNoteId).catch(() => {});
+            }
+            setAyahNotesSheet(prev => prev ? {
+              ...prev,
+              notes: prev.notes.filter(item => item.id !== note.id),
+              syncNotice: t('note_deleted'),
+            } : prev);
+            if (editingNoteId === note.id) resetNoteEditor();
+          },
+        },
+      ]
+    );
+  }, [editingNoteId, resetNoteEditor, t]);
+
   const setPendingFinishActionState = useCallback((action: PendingFinishAction) => {
     pendingFinishActionRef.current = action;
     setPendingFinishAction(action);
@@ -2819,22 +3124,6 @@ export default function SurahReaderScreen() {
   }, [finishSurahPlaybackNow, isPlayingSurah, setPendingFinishActionState]);
 
   // â"€â"€ Actions â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
-
-  const handleAyahPress = async (ayahNumberInSurah: number) => {
-    if (!surahMeta) return;
-    await setLastRead({
-      surahNumber: num,
-      surahName: surahMeta.englishName,
-      ayahNumber: ayahNumberInSurah,
-      readAt: new Date().toISOString(),
-    });
-    // Log reading session to Quran.Foundation
-    isQFLoggedIn().then(loggedIn => {
-      if (loggedIn) {
-        logQFReadingSession(`${num}:${ayahNumberInSurah}`, 30).catch(() => {});
-      }
-    });
-  };
 
   const copyAyahToClipboard = useCallback((
     ayahNumberInSurah: number,
@@ -3450,7 +3739,6 @@ export default function SurahReaderScreen() {
       );
       return;
     }
-    await handleAyahPress(numberInSurah);
     scrollAyahToTop(numberInSurah, { animated: true, force: true });
     if (pendingFinishActionRef.current !== 'none') return;
     if (ayahPlayMode === 'continuous') {
@@ -3563,7 +3851,6 @@ export default function SurahReaderScreen() {
   }, [loading, surah, num, startSurahPlayback]);
 
   const startSurahFromAyah = async (ayahNumberInSurah: number, chain = true) => {
-    await handleAyahPress(ayahNumberInSurah);
     await startSurahPlayback(Math.max(0, ayahNumberInSurah - 1), chain);
   };
 
@@ -4014,7 +4301,7 @@ export default function SurahReaderScreen() {
 
       return (
         <Pressable
-          onPress={() => handleAyahPress(arabicAyah.numberInSurah)}
+          onPress={() => openAyahActionMenu(arabicAyah, arabicText, translationAyah?.text ?? '')}
           style={({ pressed }) => [
             styles.ayahCard,
             {
@@ -4052,8 +4339,8 @@ export default function SurahReaderScreen() {
           <View style={styles.ayahHeader}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <TouchableOpacity
-                onPress={() => openAyahDetail(arabicAyah, arabicText, translationAyah?.text ?? '')}
-                accessibilityLabel={`${t('ayah_detail_title')} ${arabicAyah.numberInSurah}`}
+                onPress={() => openAyahActionMenu(arabicAyah, arabicText, translationAyah?.text ?? '')}
+                accessibilityLabel={`${t('ayah_action_menu_title')} ${arabicAyah.numberInSurah}`}
                 style={styles.ayahNumBox}
               >
                 <View style={styles.ayahNumOrnament}>
@@ -4068,27 +4355,19 @@ export default function SurahReaderScreen() {
             </View>
             <View style={styles.actionRow}>
               <TouchableOpacity
-                onPress={() => handleAyahPlayPress(arabicAyah.number, arabicAyah.numberInSurah)}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  handleAyahPlayPress(arabicAyah.number, arabicAyah.numberInSurah);
+                }}
                 style={[styles.iconBtn, { backgroundColor: isPlaying ? C.primary : C.surface }]}
               >
                 <Ionicons name={isPlaying && pendingFinishAction !== 'none' ? 'hourglass-outline' : isPlaying ? 'pause' : 'play'} size={17} color={isPlaying ? '#fff' : C.textSecondary} />
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={() => openAyahTafsir(arabicAyah.numberInSurah, arabicText, translationAyah?.text ?? '')}
-                accessibilityLabel={`${t('ayah_tafsir_title')} ${arabicAyah.numberInSurah}`}
-                style={[styles.iconBtn, { backgroundColor: C.surface }]}
-              >
-                <Ionicons name="library-outline" size={17} color={C.textSecondary} />
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => openAyahTranslations(arabicAyah.numberInSurah, arabicText)}
-                accessibilityLabel={`${t('ayah_translation_title')} ${arabicAyah.numberInSurah}`}
-                style={[styles.iconBtn, { backgroundColor: C.surface }]}
-              >
-                <Ionicons name="language-outline" size={17} color={C.textSecondary} />
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => toggleBookmark(arabicAyah.numberInSurah, arabicAyah.text, translationAyah?.text ?? '')}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  toggleBookmark(arabicAyah.numberInSurah, arabicAyah.text, translationAyah?.text ?? '');
+                }}
                 style={[styles.iconBtn, { backgroundColor: isMarked ? C.goldMuted : C.surface }]}
               >
                 <Ionicons name={isMarked ? 'bookmark' : 'bookmark-outline'} size={17} color={isMarked ? C.gold : C.textSecondary} />
@@ -4126,7 +4405,7 @@ export default function SurahReaderScreen() {
         </Pressable>
       );
     },
-    [surah, bookmarks, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, showTranslation, arabicFontSize, script, C, handleAyahPlayPress, openAyahDetail, openAyahTafsir, openAyahTranslations, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection, t]
+    [surah, bookmarks, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, showTranslation, arabicFontSize, script, C, handleAyahPlayPress, openAyahActionMenu, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection, t]
   );
 
   //Render Ayah: Tajweed Mode 
@@ -4144,13 +4423,16 @@ export default function SurahReaderScreen() {
       const { safeRight, safeVertical, lineHeight } = getArabicLayoutMetrics(arabicFontSize, script, true);
 
       return (
-        <View style={[
-          styles.ayahCard,
-          {
-            borderColor: isPlaying ? `${C.primary}99` : C.border,
-            backgroundColor: isPlaying ? `${C.primary}18` : C.card,
-          },
-        ]}>
+        <Pressable
+          onPress={() => openAyahActionMenu(arabicAyah, arabicText, translationAyah?.text ?? '')}
+          style={({ pressed }) => [
+            styles.ayahCard,
+            {
+              borderColor: isPlaying ? `${C.primary}99` : C.border,
+              backgroundColor: isPlaying ? `${C.primary}18` : pressed ? C.surface : C.card,
+            },
+          ]}
+        >
           {isPlaying && (
             <>
               <Animated.View
@@ -4179,8 +4461,8 @@ export default function SurahReaderScreen() {
           <View style={styles.ayahHeader}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
               <TouchableOpacity
-                onPress={() => openAyahDetail(arabicAyah, arabicText, translationAyah?.text ?? '')}
-                accessibilityLabel={`${t('ayah_detail_title')} ${arabicAyah.numberInSurah}`}
+                onPress={() => openAyahActionMenu(arabicAyah, arabicText, translationAyah?.text ?? '')}
+                accessibilityLabel={`${t('ayah_action_menu_title')} ${arabicAyah.numberInSurah}`}
                 style={styles.ayahNumBox}
               >
                 <View style={styles.ayahNumOrnament}>
@@ -4195,27 +4477,19 @@ export default function SurahReaderScreen() {
             </View>
             <View style={styles.actionRow}>
               <TouchableOpacity
-                onPress={() => handleAyahPlayPress(arabicAyah.number, arabicAyah.numberInSurah)}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  handleAyahPlayPress(arabicAyah.number, arabicAyah.numberInSurah);
+                }}
                 style={[styles.iconBtn, { backgroundColor: isPlaying ? C.primary : C.surface }]}
               >
                 <Ionicons name={isPlaying && pendingFinishAction !== 'none' ? 'hourglass-outline' : isPlaying ? 'pause' : 'play'} size={17} color={isPlaying ? '#fff' : C.textSecondary} />
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={() => openAyahTafsir(arabicAyah.numberInSurah, arabicText, translationAyah?.text ?? '')}
-                accessibilityLabel={`${t('ayah_tafsir_title')} ${arabicAyah.numberInSurah}`}
-                style={[styles.iconBtn, { backgroundColor: C.surface }]}
-              >
-                <Ionicons name="library-outline" size={17} color={C.textSecondary} />
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => openAyahTranslations(arabicAyah.numberInSurah, arabicText)}
-                accessibilityLabel={`${t('ayah_translation_title')} ${arabicAyah.numberInSurah}`}
-                style={[styles.iconBtn, { backgroundColor: C.surface }]}
-              >
-                <Ionicons name="language-outline" size={17} color={C.textSecondary} />
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => toggleBookmark(arabicAyah.numberInSurah, arabicAyah.text, translationAyah?.text ?? '')}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  toggleBookmark(arabicAyah.numberInSurah, arabicAyah.text, translationAyah?.text ?? '');
+                }}
                 style={[styles.iconBtn, { backgroundColor: isMarked ? C.goldMuted : C.surface }]}
               >
                 <Ionicons name={isMarked ? 'bookmark' : 'bookmark-outline'} size={17} color={isMarked ? C.gold : C.textSecondary} />
@@ -4249,10 +4523,10 @@ export default function SurahReaderScreen() {
           )}
 
           {renderAsbabSection(arabicAyah.numberInSurah)}
-        </View>
+        </Pressable>
       );
     },
-    [surah, bookmarks, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, showTranslation, arabicFontSize, script, C, handleAyahPlayPress, openAyahDetail, openAyahTafsir, openAyahTranslations, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection, t]
+    [surah, bookmarks, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, showTranslation, arabicFontSize, script, C, handleAyahPlayPress, openAyahActionMenu, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection, t]
   );
 
   // â"€â"€ Render Ayah: Pemula Mode â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -4314,14 +4588,17 @@ export default function SurahReaderScreen() {
       const isMarked = bookmarks.has(arabicAyah.numberInSurah);
 
       return (
-        <View style={[
-          styles.pemulaCard,
-          {
-            backgroundColor: isPlaying ? `${C.primary}18` : C.card,
-            borderColor: isPlaying ? `${C.primary}99` : C.border,
-            borderWidth: isPlaying ? 1.5 : 1,
-          },
-        ]}>
+        <Pressable
+          onPress={() => openAyahActionMenu(arabicAyah, arabicText, translationAyah?.text ?? '')}
+          style={({ pressed }) => [
+            styles.pemulaCard,
+            {
+              backgroundColor: isPlaying ? `${C.primary}18` : pressed ? C.surface : C.card,
+              borderColor: isPlaying ? `${C.primary}99` : C.border,
+              borderWidth: isPlaying ? 1.5 : 1,
+            },
+          ]}
+        >
           {isPlaying && (
             <>
               <Animated.View
@@ -4350,8 +4627,8 @@ export default function SurahReaderScreen() {
           {/* Nomor ayat + tombol audio */}
           <View style={[styles.pemulaHeader, { borderBottomColor: C.border }]}>
             <TouchableOpacity
-              onPress={() => openAyahDetail(arabicAyah, arabicText, translationAyah?.text ?? '')}
-              accessibilityLabel={`${t('ayah_detail_title')} ${arabicAyah.numberInSurah}`}
+              onPress={() => openAyahActionMenu(arabicAyah, arabicText, translationAyah?.text ?? '')}
+              accessibilityLabel={`${t('ayah_action_menu_title')} ${arabicAyah.numberInSurah}`}
               style={styles.pemulaNumBadge}
             >
               <View style={styles.ayahNumOrnament}>
@@ -4371,7 +4648,10 @@ export default function SurahReaderScreen() {
               </View>
             </View>
             <TouchableOpacity
-              onPress={() => handleAyahPlayPress(arabicAyah.number, arabicAyah.numberInSurah)}
+              onPress={(event) => {
+                event.stopPropagation();
+                handleAyahPlayPress(arabicAyah.number, arabicAyah.numberInSurah);
+              }}
               style={[styles.pemulaPlayBtn, { backgroundColor: isPlaying ? C.primary : C.primaryMuted }]}
             >
               <Ionicons name={isPlaying && pendingFinishAction !== 'none' ? 'hourglass-outline' : isPlaying ? 'pause' : 'play'} size={18} color={isPlaying ? '#fff' : C.primary} />
@@ -4380,21 +4660,10 @@ export default function SurahReaderScreen() {
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
-              onPress={() => openAyahTafsir(arabicAyah.numberInSurah, arabicText, translationAyah?.text ?? '')}
-              accessibilityLabel={`${t('ayah_tafsir_title')} ${arabicAyah.numberInSurah}`}
-              style={[styles.iconBtn, { backgroundColor: C.surface, marginLeft: 8 }]}
-            >
-              <Ionicons name="library-outline" size={17} color={C.textSecondary} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => openAyahTranslations(arabicAyah.numberInSurah, arabicText)}
-              accessibilityLabel={`${t('ayah_translation_title')} ${arabicAyah.numberInSurah}`}
-              style={[styles.iconBtn, { backgroundColor: C.surface, marginLeft: 8 }]}
-            >
-              <Ionicons name="language-outline" size={17} color={C.textSecondary} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => toggleBookmark(arabicAyah.numberInSurah, arabicAyah.text, translationAyah?.text ?? '')}
+              onPress={(event) => {
+                event.stopPropagation();
+                toggleBookmark(arabicAyah.numberInSurah, arabicAyah.text, translationAyah?.text ?? '');
+              }}
               style={[styles.iconBtn, { backgroundColor: isMarked ? C.goldMuted : C.surface, marginLeft: 8 }]}
             >
               <Ionicons name={isMarked ? 'bookmark' : 'bookmark-outline'} size={17} color={isMarked ? C.gold : C.textSecondary} />
@@ -4488,10 +4757,10 @@ export default function SurahReaderScreen() {
           )}
 
           {renderAsbabSection(arabicAyah.numberInSurah)}
-        </View>
+        </Pressable>
       );
     },
-    [surah, bookmarks, translitTexts, wordByWordMap, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, showTranslation, arabicFontSize, script, C, surahMeta, showBasmalah, ayahPlayMode, handleAyahPlayPress, openAyahDetail, openAyahTafsir, openAyahTranslations, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection, lang, t]
+    [surah, bookmarks, translitTexts, wordByWordMap, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, showTranslation, arabicFontSize, script, C, surahMeta, showBasmalah, ayahPlayMode, handleAyahPlayPress, openAyahActionMenu, copyAyahToClipboard, renderAsbabBadge, renderAsbabSection, lang, t]
   );
 
   // â"€â"€ Header komponen untuk FlatList â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -4889,15 +5158,18 @@ export default function SurahReaderScreen() {
       };
 
       return (
-        <View style={[styles.ayahCard, {
-          borderColor: isPlaying ? `${C.primary}66` : C.border,
-          backgroundColor: isPlaying ? `${C.primary}12` : C.card,
-        }]}>
+        <Pressable
+          onPress={() => openAyahActionMenu(arabicAyah, arabicText, transAyah?.text ?? '', surahNum, surahM?.englishName)}
+          style={({ pressed }) => [styles.ayahCard, {
+            borderColor: isPlaying ? `${C.primary}66` : C.border,
+            backgroundColor: isPlaying ? `${C.primary}12` : pressed ? C.surface : C.card,
+          }]}
+        >
           <View style={styles.ayahHeader}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <TouchableOpacity
-                onPress={() => openAyahDetail(arabicAyah, arabicText, transAyah?.text ?? '', surahNum, surahM?.englishName)}
-                accessibilityLabel={`${t('ayah_detail_title')} ${arabicAyah.numberInSurah}`}
+                onPress={() => openAyahActionMenu(arabicAyah, arabicText, transAyah?.text ?? '', surahNum, surahM?.englishName)}
+                accessibilityLabel={`${t('ayah_action_menu_title')} ${arabicAyah.numberInSurah}`}
                 style={styles.ayahNumBox}
               >
                 <View style={styles.ayahNumOrnament}>
@@ -4911,7 +5183,10 @@ export default function SurahReaderScreen() {
             </View>
             <View style={styles.actionRow}>
               <TouchableOpacity
-                onPress={() => playJuzAyah(surahNum, arabicAyah.numberInSurah)}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  playJuzAyah(surahNum, arabicAyah.numberInSurah);
+                }}
                 style={[styles.iconBtn, { backgroundColor: isPlaying ? C.primary : C.surface }]}
               >
                 <Ionicons
@@ -4921,21 +5196,10 @@ export default function SurahReaderScreen() {
                 />
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={() => openAyahTafsir(arabicAyah.numberInSurah, arabicText, transAyah?.text ?? '', surahNum, surahM?.englishName)}
-                accessibilityLabel={`${t('ayah_tafsir_title')} ${arabicAyah.numberInSurah}`}
-                style={[styles.iconBtn, { backgroundColor: C.surface }]}
-              >
-                <Ionicons name="library-outline" size={17} color={C.textSecondary} />
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => openAyahTranslations(arabicAyah.numberInSurah, arabicText, surahNum, surahM?.englishName)}
-                accessibilityLabel={`${t('ayah_translation_title')} ${arabicAyah.numberInSurah}`}
-                style={[styles.iconBtn, { backgroundColor: C.surface }]}
-              >
-                <Ionicons name="language-outline" size={17} color={C.textSecondary} />
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => toggleJuzBookmark(surahNum, arabicAyah.numberInSurah, arabicText, transAyah?.text ?? '')}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  toggleJuzBookmark(surahNum, arabicAyah.numberInSurah, arabicText, transAyah?.text ?? '');
+                }}
                 style={[styles.iconBtn, { backgroundColor: isMarked ? C.goldMuted : C.surface }]}
               >
                 <Ionicons name={isMarked ? 'bookmark' : 'bookmark-outline'} size={17} color={isMarked ? C.gold : C.textSecondary} />
@@ -4964,12 +5228,12 @@ export default function SurahReaderScreen() {
               </Text>
             </View>
           )}
-        </View>
+        </Pressable>
       );
     }
     return null;
   }, [C, arabicFontSize, script, arabicFontFamily, showTranslation, juzAllBookmarks, juzPlayingKey,
-      isPlayingSurah, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, num, playJuzAyah, openAyahDetail, openAyahTafsir, openAyahTranslations, toggleJuzBookmark, renderArabicWithWaqfGuide,
+      isPlayingSurah, playingAyah, playingAyahProgress, activeAyahWordIndex, pendingFinishAction, reciterCapability, num, playJuzAyah, openAyahActionMenu, toggleJuzBookmark, renderArabicWithWaqfGuide,
       getSurahMeaningText, getRevelationTypeText, t]);
 
   // â"€â"€ Main render â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -5445,6 +5709,389 @@ export default function SurahReaderScreen() {
                 </>
               );
             })()}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Ayah action menu */}
+      <Modal visible={!!ayahActionMenu} transparent animationType="fade" onRequestClose={closeAyahActionMenu}>
+        <View style={{ flex: 1 }}>
+          <Pressable
+            style={[StyleSheet.absoluteFillObject, { backgroundColor: C.overlay }]}
+            onPress={closeAyahActionMenu}
+          />
+          <Pressable
+            style={[styles.ayahActionSheet, { backgroundColor: C.surface, borderColor: C.border }]}
+            onPress={event => event.stopPropagation()}
+          >
+            <View style={[styles.sheetHandle, { backgroundColor: C.border }]} />
+            {ayahActionMenu ? (
+              <>
+                <View style={styles.ayahActionHeader}>
+                  <View style={[styles.ayahTafsirIcon, { backgroundColor: `${C.primary}18` }]}>
+                    <Ionicons name="ellipsis-horizontal" size={20} color={C.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: C.text, fontSize: FontSize.lg, fontWeight: '800' }} numberOfLines={1}>
+                      {t('ayah_action_menu_title')}
+                    </Text>
+                    <Text style={{ color: C.textMuted, fontSize: FontSize.xs, marginTop: 2 }} numberOfLines={1}>
+                      {ayahActionMenu.surahName} · {t('verse_label')} {ayahActionMenu.ayahNumber}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={closeAyahActionMenu} hitSlop={10} style={styles.tpCloseBtn}>
+                    <Ionicons name="close" size={18} color={C.textMuted} />
+                  </TouchableOpacity>
+                </View>
+
+                <View style={[styles.ayahActionVerseBox, { backgroundColor: C.card, borderColor: C.border }]}>
+                  <Text
+                    style={[styles.ayahActionArabic, { color: C.text, fontFamily: arabicFontFamily }]}
+                    numberOfLines={2}
+                  >
+                    {ayahActionMenu.arabic}
+                  </Text>
+                  {!!ayahActionMenu.translation && (
+                    <Text style={{ color: C.textSecondary, fontSize: FontSize.xs, lineHeight: 18, marginTop: 8 }} numberOfLines={2}>
+                      {ayahActionMenu.translation}
+                    </Text>
+                  )}
+                </View>
+
+                <View style={styles.ayahActionList}>
+                  <TouchableOpacity
+                    onPress={markAyahAsReadFromMenu}
+                    activeOpacity={0.75}
+                    style={[styles.ayahActionRowItem, { backgroundColor: `${C.primary}12`, borderColor: `${C.primary}35` }]}
+                  >
+                    <View style={[styles.ayahActionIcon, { backgroundColor: C.primaryMuted }]}>
+                      <Ionicons name="checkmark-done-outline" size={18} color={C.primary} />
+                    </View>
+                    <View style={styles.ayahActionText}>
+                      <Text style={{ color: C.text, fontSize: FontSize.sm, fontWeight: '800' }}>
+                        {t('mark_read_progress')}
+                      </Text>
+                      <Text style={{ color: C.textMuted, fontSize: 11, marginTop: 2 }} numberOfLines={1}>
+                        {t('mark_read_progress_desc')}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color={C.textMuted} />
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    onPress={() => {
+                      const target = ayahActionMenu;
+                      if (!target) return;
+                      openAyahNotes(target);
+                    }}
+                    activeOpacity={0.75}
+                    style={[styles.ayahActionRowItem, { backgroundColor: C.card, borderColor: C.border }]}
+                  >
+                    <View style={[styles.ayahActionIcon, { backgroundColor: `${C.gold}14` }]}>
+                      <Ionicons name="document-text-outline" size={18} color={C.gold} />
+                    </View>
+                    <View style={styles.ayahActionText}>
+                      <Text style={{ color: C.text, fontSize: FontSize.sm, fontWeight: '800' }}>
+                        {t('ayah_notes_title')}
+                      </Text>
+                      <Text style={{ color: C.textMuted, fontSize: 11, marginTop: 2 }} numberOfLines={1}>
+                        {t('ayah_notes_menu_desc')}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color={C.textMuted} />
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    onPress={() => {
+                      const target = ayahActionMenu;
+                      if (!target) return;
+                      setAyahActionMenu(null);
+                      openAyahTafsir(target.ayahNumber, target.arabic, target.translation, target.surahNumber, target.surahName).catch(() => {});
+                    }}
+                    activeOpacity={0.75}
+                    style={[styles.ayahActionRowItem, { backgroundColor: C.card, borderColor: C.border }]}
+                  >
+                    <View style={[styles.ayahActionIcon, { backgroundColor: `${C.primary}14` }]}>
+                      <Ionicons name="library-outline" size={18} color={C.primary} />
+                    </View>
+                    <View style={styles.ayahActionText}>
+                      <Text style={{ color: C.text, fontSize: FontSize.sm, fontWeight: '800' }}>
+                        {t('ayah_tafsir_title')}
+                      </Text>
+                      <Text style={{ color: C.textMuted, fontSize: 11, marginTop: 2 }} numberOfLines={1}>
+                        {t('ayah_tafsir_menu_desc')}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color={C.textMuted} />
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    onPress={() => {
+                      const target = ayahActionMenu;
+                      if (!target) return;
+                      setAyahActionMenu(null);
+                      openAyahTranslations(target.ayahNumber, target.arabic, target.surahNumber, target.surahName).catch(() => {});
+                    }}
+                    activeOpacity={0.75}
+                    style={[styles.ayahActionRowItem, { backgroundColor: C.card, borderColor: C.border }]}
+                  >
+                    <View style={[styles.ayahActionIcon, { backgroundColor: `${C.primary}14` }]}>
+                      <Ionicons name="language-outline" size={18} color={C.primary} />
+                    </View>
+                    <View style={styles.ayahActionText}>
+                      <Text style={{ color: C.text, fontSize: FontSize.sm, fontWeight: '800' }}>
+                        {t('ayah_translation_title')}
+                      </Text>
+                      <Text style={{ color: C.textMuted, fontSize: 11, marginTop: 2 }} numberOfLines={1}>
+                        {t('ayah_translation_menu_desc')}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color={C.textMuted} />
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    onPress={() => {
+                      const target = ayahActionMenu;
+                      if (!target) return;
+                      setAyahActionMenu(null);
+                      openAyahDetail(target.ayah, target.arabic, target.translation, target.surahNumber, target.surahName);
+                    }}
+                    activeOpacity={0.75}
+                    style={[styles.ayahActionRowItem, { backgroundColor: C.card, borderColor: C.border }]}
+                  >
+                    <View style={[styles.ayahActionIcon, { backgroundColor: `${C.primary}14` }]}>
+                      <Ionicons name="information-circle-outline" size={18} color={C.primary} />
+                    </View>
+                    <View style={styles.ayahActionText}>
+                      <Text style={{ color: C.text, fontSize: FontSize.sm, fontWeight: '800' }}>
+                        {t('ayah_detail_title')}
+                      </Text>
+                      <Text style={{ color: C.textMuted, fontSize: 11, marginTop: 2 }} numberOfLines={1}>
+                        {t('ayah_detail_menu_desc')}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color={C.textMuted} />
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : null}
+          </Pressable>
+        </View>
+      </Modal>
+
+      {/* Ayah notes sheet */}
+      <Modal visible={!!ayahNotesSheet} transparent animationType="slide" onRequestClose={closeAyahNotes}>
+        <View style={{ flex: 1 }}>
+          <Pressable
+            style={[StyleSheet.absoluteFillObject, { backgroundColor: C.overlay }]}
+            onPress={closeAyahNotes}
+          />
+          <View style={[styles.ayahTafsirSheet, { backgroundColor: C.surface }]}>
+            <View style={[styles.sheetHandle, { backgroundColor: C.border }]} />
+            {ayahNotesSheet ? (
+              <>
+                <View style={styles.ayahTafsirHeader}>
+                  <View style={[styles.ayahTafsirIcon, { backgroundColor: `${C.gold}18` }]}>
+                    <Ionicons name="document-text-outline" size={18} color={C.gold} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: C.text, fontSize: FontSize.lg, fontWeight: '800' }} numberOfLines={1}>
+                      {t('ayah_notes_title')}
+                    </Text>
+                    <Text style={{ color: C.textMuted, fontSize: FontSize.xs, marginTop: 2 }} numberOfLines={1}>
+                      {ayahNotesSheet.surahName} · {t('verse_label')} {ayahNotesSheet.ayahNumber}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={closeAyahNotes} hitSlop={10} style={styles.tpCloseBtn}>
+                    <Ionicons name="close" size={18} color={C.textMuted} />
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.ayahTafsirScroll}>
+                  <View style={[styles.ayahTafsirVerseBox, { backgroundColor: C.card, borderColor: C.border }]}>
+                    <Text style={[styles.ayahTafsirArabic, { color: C.text, fontFamily: arabicFontFamily }]}>
+                      {ayahNotesSheet.arabic}
+                    </Text>
+                    {!!ayahNotesSheet.translation && (
+                      <Text style={{ color: C.textSecondary, fontSize: FontSize.sm, lineHeight: 21, marginTop: 10 }}>
+                        {ayahNotesSheet.translation}
+                      </Text>
+                    )}
+                  </View>
+
+                  <View style={[styles.ayahTafsirSourceNote, { backgroundColor: `${C.gold}10`, borderColor: `${C.gold}28` }]}>
+                    <Ionicons name="lock-closed-outline" size={14} color={C.gold} />
+                    <Text style={{ color: C.textSecondary, fontSize: 11, lineHeight: 17, flex: 1, marginLeft: 8 }}>
+                      {t('note_private_hint')}
+                    </Text>
+                  </View>
+
+                  <View style={styles.noteCategoryRow}>
+                    {NOTE_CATEGORY_OPTIONS.map(option => {
+                      const active = noteCategory === option.id;
+                      return (
+                        <TouchableOpacity
+                          key={option.id}
+                          onPress={() => setNoteCategory(option.id)}
+                          activeOpacity={0.75}
+                          style={[
+                            styles.noteCategoryChip,
+                            {
+                              backgroundColor: active ? `${C.gold}18` : C.card,
+                              borderColor: active ? `${C.gold}70` : C.border,
+                            },
+                          ]}
+                        >
+                          <Ionicons name={option.icon} size={14} color={active ? C.gold : C.textMuted} />
+                          <Text style={{ color: active ? C.gold : C.textSecondary, fontSize: 11, fontWeight: '800', marginLeft: 6 }} numberOfLines={1}>
+                            {getNoteCategoryLabel(option.id)}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  <TextInput
+                    value={noteDraft}
+                    onChangeText={setNoteDraft}
+                    placeholder={t('note_body_placeholder')}
+                    placeholderTextColor={C.textMuted}
+                    multiline
+                    textAlignVertical="top"
+                    style={[styles.noteInput, { backgroundColor: C.card, borderColor: C.border, color: C.text }]}
+                  />
+
+                  <TextInput
+                    value={noteSource}
+                    onChangeText={setNoteSource}
+                    placeholder={t('note_source_placeholder')}
+                    placeholderTextColor={C.textMuted}
+                    style={[styles.noteSourceInput, { backgroundColor: C.card, borderColor: C.border, color: C.text }]}
+                  />
+
+                  <View style={styles.noteEditorActions}>
+                    {editingNoteId ? (
+                      <TouchableOpacity
+                        onPress={resetNoteEditor}
+                        activeOpacity={0.75}
+                        style={[styles.noteSecondaryBtn, { borderColor: C.border, backgroundColor: C.card }]}
+                      >
+                        <Text style={{ color: C.textSecondary, fontSize: FontSize.sm, fontWeight: '800' }}>
+                          {t('note_cancel_edit')}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
+                    <TouchableOpacity
+                      onPress={saveAyahNote}
+                      disabled={noteSaving || !noteDraft.trim()}
+                      activeOpacity={0.75}
+                      style={[
+                        styles.notePrimaryBtn,
+                        {
+                          backgroundColor: noteSaving || !noteDraft.trim() ? C.border : C.gold,
+                          opacity: noteSaving || !noteDraft.trim() ? 0.72 : 1,
+                        },
+                      ]}
+                    >
+                      {noteSaving ? (
+                        <ActivityIndicator size="small" color="#111827" />
+                      ) : (
+                        <Ionicons name={editingNoteId ? 'checkmark-done-outline' : 'add'} size={16} color="#111827" />
+                      )}
+                      <Text style={{ color: '#111827', fontSize: FontSize.sm, fontWeight: '900', marginLeft: 8 }}>
+                        {editingNoteId ? t('note_update') : t('note_save')}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {!!ayahNotesSheet.syncNotice && (
+                    <Text style={{ color: C.textMuted, fontSize: 11, lineHeight: 17, marginBottom: 10 }}>
+                      {ayahNotesSheet.syncNotice}
+                    </Text>
+                  )}
+
+                  {ayahNotesSheet.loading ? (
+                    <View style={styles.ayahTafsirLoading}>
+                      <ActivityIndicator size="small" color={C.gold} />
+                      <Text style={{ color: C.textMuted, fontSize: FontSize.sm, marginTop: 8 }}>
+                        {t('note_loading')}
+                      </Text>
+                    </View>
+                  ) : ayahNotesSheet.error ? (
+                    <Text style={{ color: C.error, fontSize: FontSize.sm, lineHeight: 21 }}>
+                      {ayahNotesSheet.error}
+                    </Text>
+                  ) : ayahNotesSheet.notes.length === 0 ? (
+                    <View style={[styles.noteEmptyBox, { backgroundColor: C.card, borderColor: C.border }]}>
+                      <Ionicons name="document-text-outline" size={22} color={C.textMuted} />
+                      <Text style={{ color: C.textMuted, fontSize: FontSize.sm, lineHeight: 21, marginTop: 8, textAlign: 'center' }}>
+                        {t('note_empty')}
+                      </Text>
+                    </View>
+                  ) : (
+                    <View style={{ gap: 10 }}>
+                      {ayahNotesSheet.notes.map(note => {
+                        const statusLabel =
+                          note.syncStatus === 'synced'
+                            ? t('note_synced')
+                            : note.syncStatus === 'pending'
+                              ? t('note_pending')
+                              : note.syncStatus === 'failed'
+                                ? t('note_sync_failed')
+                                : t('note_local');
+                        const statusColor =
+                          note.syncStatus === 'synced'
+                            ? C.primary
+                            : note.syncStatus === 'failed'
+                              ? C.error
+                              : C.textMuted;
+                        return (
+                          <View key={note.id} style={[styles.noteCard, { backgroundColor: C.card, borderColor: C.border }]}>
+                            <View style={styles.noteCardHeader}>
+                              <View style={[styles.noteCategoryBadge, { backgroundColor: `${C.gold}14`, borderColor: `${C.gold}30` }]}>
+                                <Text style={{ color: C.gold, fontSize: 10, fontWeight: '900' }}>
+                                  {getNoteCategoryLabel(note.category)}
+                                </Text>
+                              </View>
+                              <Text style={{ color: statusColor, fontSize: 10, fontWeight: '800' }} numberOfLines={1}>
+                                {statusLabel}
+                              </Text>
+                            </View>
+                            <Text style={{ color: C.textSecondary, fontSize: FontSize.sm, lineHeight: 22, marginTop: 10 }}>
+                              {note.body}
+                            </Text>
+                            {!!note.source && (
+                              <Text style={{ color: C.textMuted, fontSize: 11, lineHeight: 17, marginTop: 8 }}>
+                                {t('source_label')}: {note.source}
+                              </Text>
+                            )}
+                            <View style={styles.noteCardFooter}>
+                              <Text style={{ color: C.textMuted, fontSize: 10, flex: 1 }} numberOfLines={1}>
+                                {new Date(note.updatedAt).toLocaleDateString(lang === 'id' ? 'id-ID' : 'en-US')}
+                              </Text>
+                              <TouchableOpacity
+                                onPress={() => editAyahNote(note)}
+                                activeOpacity={0.75}
+                                style={[styles.noteActionMiniBtn, { borderColor: C.border }]}
+                              >
+                                <Ionicons name="create-outline" size={14} color={C.textSecondary} />
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                onPress={() => deleteAyahNote(note)}
+                                activeOpacity={0.75}
+                                style={[styles.noteActionMiniBtn, { borderColor: C.border }]}
+                              >
+                                <Ionicons name="trash-outline" size={14} color={C.error} />
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
+                </ScrollView>
+              </>
+            ) : null}
           </View>
         </View>
       </Modal>
@@ -6754,6 +7401,58 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     flexShrink: 0,
   },
+  ayahActionSheet: {
+    position: 'absolute',
+    left: Spacing.sm,
+    right: Spacing.sm,
+    bottom: Spacing.sm,
+    borderRadius: BorderRadius.lg,
+    borderWidth: 1,
+    paddingTop: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    paddingBottom: Spacing.md,
+  },
+  ayahActionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingBottom: Spacing.md,
+  },
+  ayahActionVerseBox: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.md,
+    padding: Spacing.sm,
+    marginBottom: Spacing.sm,
+  },
+  ayahActionArabic: {
+    fontSize: 21,
+    lineHeight: 34,
+    textAlign: 'right',
+    writingDirection: 'rtl',
+  },
+  ayahActionList: {
+    gap: 8,
+  },
+  ayahActionRowItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: BorderRadius.md,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  ayahActionIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  ayahActionText: {
+    flex: 1,
+    marginHorizontal: 10,
+  },
   ayahTafsirSheet: {
     position: 'absolute',
     left: 0,
@@ -6824,6 +7523,103 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 9,
     marginTop: Spacing.md,
+  },
+  noteCategoryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 10,
+  },
+  noteCategoryChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: BorderRadius.full,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    minHeight: 32,
+  },
+  noteInput: {
+    minHeight: 118,
+    borderWidth: 1,
+    borderRadius: BorderRadius.lg,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    fontSize: FontSize.sm,
+    lineHeight: 21,
+    marginBottom: 10,
+  },
+  noteSourceInput: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.lg,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: FontSize.sm,
+    marginBottom: 10,
+  },
+  noteEditorActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 8,
+    marginBottom: 10,
+  },
+  notePrimaryBtn: {
+    minHeight: 42,
+    borderRadius: BorderRadius.lg,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  noteSecondaryBtn: {
+    minHeight: 42,
+    borderRadius: BorderRadius.lg,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  noteEmptyBox: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.xl,
+  },
+  noteCard: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.md,
+  },
+  noteCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  noteCategoryBadge: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.full,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  noteCardFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 12,
+  },
+  noteActionMiniBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   qfAudioSection: {
     marginBottom: Spacing.md,

@@ -9,11 +9,26 @@
 import type { AudioPlayer } from 'expo-audio';
 
 let _player: AudioPlayer | null = null;
+const _players = new Set<AudioPlayer>();
+
+const stopPlayer = (player: AudioPlayer | null | undefined): void => {
+  if (!player) return;
+  try { player.pause(); } catch {}
+  try { player.clearLockScreenControls(); } catch {}
+  try { player.remove(); } catch {}
+};
 
 export const quranAudioService = {
   /** Simpan player ke service (biasanya saat clip baru dimulai). */
   attach(player: AudioPlayer): void {
+    _players.forEach(p => {
+      if (p !== player) {
+        stopPlayer(p);
+        _players.delete(p);
+      }
+    });
     _player = player;
+    _players.add(player);
   },
 
   /** Lepas referensi dari service (tanpa menghentikan audio). */
@@ -32,9 +47,8 @@ export const quranAudioService = {
   stop(): void {
     const p = _player;
     _player = null;
-    if (p) {
-      try { p.clearLockScreenControls(); } catch {}
-      try { p.remove(); } catch {}
-    }
+    _players.forEach(player => stopPlayer(player));
+    _players.clear();
+    stopPlayer(p);
   },
 };

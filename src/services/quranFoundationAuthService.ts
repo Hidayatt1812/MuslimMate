@@ -15,7 +15,7 @@ export const QF_DISCOVERY = {
   tokenEndpoint: `${QF_OAUTH_BASE}/oauth2/token`,
 };
 
-export const QF_SCOPES = ['openid', 'offline_access', 'user', 'bookmark', 'reading_session'];
+export const QF_SCOPES = ['openid', 'offline_access', 'user', 'bookmark', 'reading_session', 'note'];
 
 const TOKENS_KEY = '@qf_auth_tokens';
 const USER_KEY = '@qf_user_info';
@@ -42,6 +42,15 @@ export interface QFBookmark {
   verse_number: number;
   mushaf_id: number;
   created_at: string;
+}
+
+export interface QFNote {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  body: string;
+  source?: string;
+  ranges?: string[];
 }
 
 export function isQFProxyConfigured(): boolean {
@@ -195,4 +204,59 @@ export async function logQFReadingSession(verseKey: string, durationSeconds: num
     method: 'POST',
     body: JSON.stringify({ verse_key: verseKey, duration: durationSeconds }),
   });
+}
+
+const normalizeQFNotes = (data: any): QFNote[] => {
+  const rows = Array.isArray(data?.data)
+    ? data.data
+    : data?.data && typeof data.data === 'object'
+      ? [data.data]
+    : Array.isArray(data?.notes)
+      ? data.notes
+      : data && typeof data === 'object' && !Array.isArray(data) && data.id
+        ? [data]
+      : Array.isArray(data)
+        ? data
+        : [];
+  return rows
+    .map((item: any): QFNote | null => {
+      const id = String(item?.id ?? '').trim();
+      const body = String(item?.body ?? '').trim();
+      if (!id || !body) return null;
+      return {
+        id,
+        body,
+        createdAt: String(item?.createdAt ?? item?.created_at ?? new Date().toISOString()),
+        updatedAt: String(item?.updatedAt ?? item?.updated_at ?? item?.createdAt ?? new Date().toISOString()),
+        source: item?.source ? String(item.source) : undefined,
+        ranges: Array.isArray(item?.ranges) ? item.ranges.map(String) : [],
+      };
+    })
+    .filter((item: QFNote | null): item is QFNote => Boolean(item));
+};
+
+export async function fetchQFNotesByVerse(verseKey: string): Promise<QFNote[]> {
+  const data = await userFetch(`/user/notes/by-verse?verseKey=${encodeURIComponent(verseKey)}`);
+  return normalizeQFNotes(data);
+}
+
+export async function addQFNote(body: string, verseKey: string): Promise<QFNote | null> {
+  const range = `${verseKey}-${verseKey}`;
+  const data = await userFetch('/user/notes', {
+    method: 'POST',
+    body: JSON.stringify({ body, saveToQR: false, ranges: [range] }),
+  });
+  return normalizeQFNotes(data)[0] ?? normalizeQFNotes(data?.data)[0] ?? null;
+}
+
+export async function updateQFNote(noteId: string, body: string): Promise<QFNote | null> {
+  const data = await userFetch(`/user/notes/${encodeURIComponent(noteId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ body, saveToQR: false }),
+  });
+  return normalizeQFNotes(data)[0] ?? normalizeQFNotes(data?.data)[0] ?? null;
+}
+
+export async function deleteQFNote(noteId: string): Promise<void> {
+  await userFetch(`/user/notes/${encodeURIComponent(noteId)}`, { method: 'DELETE' });
 }

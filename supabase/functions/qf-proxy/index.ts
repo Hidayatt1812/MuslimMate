@@ -295,6 +295,11 @@ function userApiPath(routePath: string): string | null {
   }
   if (routePath === '/user/reading-sessions') return '/auth/v1/reading_sessions';
   if (routePath === '/user/reading_sessions') return '/auth/v1/reading_sessions';
+  if (routePath === '/user/notes') return '/auth/v1/notes';
+  if (routePath === '/user/notes/by-verse') return '/auth/v1/notes/by-verse';
+  if (/^\/user\/notes\/[^/]+$/.test(routePath)) {
+    return routePath.replace(/^\/user/, '/auth/v1');
+  }
   return null;
 }
 

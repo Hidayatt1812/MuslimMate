@@ -1,4 +1,4 @@
-﻿import React, { useState, useMemo, useEffect } from 'react';
+﻿import React, { useCallback, useState, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -12,6 +12,7 @@ import {
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -115,8 +116,10 @@ export default function QuranScreen() {
   const scheme = useColorScheme() ?? 'dark';
   const C = Colors[scheme];
   const { t, lang } = useTranslation();
+  const searchInputRef = React.useRef<TextInput>(null);
 
   const [search, setSearch] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
   const [chapterTranslations, setChapterTranslations] = useState<Record<number, string>>({});
   const [browseMode, setBrowseMode] = useState<BrowseMode>('surah');
   const [showSettings, setShowSettings] = useState(false);
@@ -130,6 +133,11 @@ export default function QuranScreen() {
   const [fontSize, setFontSize]           = useState(DEFAULT_PREFS.fontSize);
   const [showTranslation, setShowTranslation] = useState(DEFAULT_PREFS.showTranslation);
 
+  const refreshQuranOverview = useCallback(() => {
+    getBookmarks().then(setBookmarkHistory);
+    getLastRead().then(setLastRead);
+  }, []);
+
   useEffect(() => {
     getItem<QuranPrefs>(STORAGE_KEY).then(saved => {
       if (saved) {
@@ -139,9 +147,14 @@ export default function QuranScreen() {
         setShowTranslation(saved.showTranslation ?? DEFAULT_PREFS.showTranslation);
       }
     });
-    getBookmarks().then(setBookmarkHistory);
-    getLastRead().then(setLastRead);
-  }, []);
+    refreshQuranOverview();
+  }, [refreshQuranOverview]);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshQuranOverview();
+    }, [refreshQuranOverview])
+  );
 
   useEffect(() => {
     let active = true;
@@ -271,6 +284,16 @@ export default function QuranScreen() {
     } as any);
   };
 
+  const toggleHeaderSearch = useCallback(() => {
+    if (searchOpen) {
+      setSearch('');
+      setSearchOpen(false);
+      return;
+    }
+    setSearchOpen(true);
+    setTimeout(() => searchInputRef.current?.focus(), 80);
+  }, [searchOpen]);
+
   const groupedBookmarks = useMemo(() => {
     const out = new Map<string, BookmarkItem[]>();
     bookmarkHistory.forEach(item => {
@@ -379,23 +402,58 @@ export default function QuranScreen() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: C.background }}>
       <View style={[styles.simpleHeader, { backgroundColor: C.surface, borderBottomColor: C.border }]}>
-        <View style={[styles.quranIconBadge, { backgroundColor: `${C.primary}15`, borderColor: `${C.primary}30` }]}>
-          <LogoSvgIcon name="quran" size={23} color={C.primary} />
-        </View>
-        <View style={{ flex: 1, marginLeft: 12 }}>
-          <Text style={{ color: C.primary, fontSize: 26, fontFamily: arabicFontFamily, lineHeight: 38 }}>
-            {'\u0627\u0644\u0642\u0631\u0622\u0646 \u0627\u0644\u0643\u0631\u064A\u0645'}
-          </Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 }}>
-            <View style={[styles.headerPill, { backgroundColor: `${C.primary}14` }]}>
-              <Text style={{ color: C.primary, fontSize: 10, fontWeight: '700' }}>114 {t('surah_label')}</Text>
-            </View>
-            <View style={[styles.headerPill, { backgroundColor: `${C.gold}14` }]}>
-              <Text style={{ color: C.gold, fontSize: 10, fontWeight: '700' }}>30 {t('juz_label')}</Text>
-            </View>
+        {searchOpen ? (
+          <View style={[styles.headerSearchBox, { backgroundColor: C.card, borderColor: C.border }]}>
+            <Ionicons name="search-outline" size={17} color={C.textMuted} />
+            <TextInput
+              ref={searchInputRef}
+              value={search}
+              onChangeText={setSearch}
+              placeholder={t('search_surah')}
+              placeholderTextColor={C.textMuted}
+              style={[styles.headerSearchInput, { color: C.text }]}
+              returnKeyType="search"
+              clearButtonMode="while-editing"
+            />
+            {search.length > 0 && (
+              <TouchableOpacity onPress={() => setSearch('')} hitSlop={10}>
+                <Ionicons name="close-circle" size={18} color={C.textMuted} />
+              </TouchableOpacity>
+            )}
           </View>
-        </View>
+        ) : (
+          <>
+            <View style={[styles.quranIconBadge, { backgroundColor: `${C.primary}15`, borderColor: `${C.primary}30` }]}>
+              <LogoSvgIcon name="quran" size={23} color={C.primary} />
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={{ color: C.primary, fontSize: 21, fontFamily: arabicFontFamily, lineHeight: 31 }}>
+                {'\u0627\u0644\u0642\u0631\u0622\u0646 \u0627\u0644\u0643\u0631\u064A\u0645'}
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 }}>
+                <View style={[styles.headerPill, { backgroundColor: `${C.primary}14` }]}>
+                  <Text style={{ color: C.primary, fontSize: 10, fontWeight: '700' }}>114 {t('surah_label')}</Text>
+                </View>
+                <View style={[styles.headerPill, { backgroundColor: `${C.gold}14` }]}>
+                  <Text style={{ color: C.gold, fontSize: 10, fontWeight: '700' }}>30 {t('juz_label')}</Text>
+                </View>
+              </View>
+            </View>
+          </>
+        )}
         <View style={styles.headerActions}>
+          <TouchableOpacity
+            onPress={toggleHeaderSearch}
+            style={[
+              styles.settingsBtn,
+              {
+                backgroundColor: searchOpen ? C.primaryMuted : C.card,
+                borderColor: searchOpen ? `${C.primary}55` : C.border,
+              },
+            ]}
+          >
+            <Ionicons name={searchOpen ? 'close' : 'search-outline'} size={18} color={searchOpen ? C.primary : C.textSecondary} />
+          </TouchableOpacity>
           <TouchableOpacity
             onPress={() => setShowBookmarkHistory(true)}
             style={[styles.settingsBtn, { backgroundColor: C.card, borderColor: C.border }]}
@@ -456,26 +514,6 @@ export default function QuranScreen() {
             </TouchableOpacity>
           );
         })}
-      </View>
-
-      <View style={[styles.searchWrap, { backgroundColor: C.surface, borderBottomColor: C.border }]}>
-        <View style={[styles.searchBox, { backgroundColor: C.card, borderColor: C.border }]}>
-          <Ionicons name="search-outline" size={18} color={C.textMuted} />
-          <TextInput
-            value={search}
-            onChangeText={setSearch}
-            placeholder={t('search_surah')}
-            placeholderTextColor={C.textMuted}
-            style={{ flex: 1, color: C.text, fontSize: 14, marginLeft: 10, paddingVertical: 0 }}
-            returnKeyType="search"
-            clearButtonMode="while-editing"
-          />
-          {search.length > 0 && (
-            <TouchableOpacity onPress={() => setSearch('')} hitSlop={10}>
-              <Ionicons name="close-circle" size={18} color={C.textMuted} />
-            </TouchableOpacity>
-          )}
-        </View>
       </View>
 
       {browseMode === 'surah' ? (
@@ -770,6 +808,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    marginLeft: 10,
+    flexShrink: 0,
+  },
+  headerSearchBox: {
+    flex: 1,
+    height: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: BorderRadius.lg,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+  },
+  headerSearchInput: {
+    flex: 1,
+    fontSize: 14,
+    marginLeft: 8,
+    paddingVertical: 0,
   },
   settingsBtn: {
     width: 44,
@@ -807,20 +862,6 @@ const styles = StyleSheet.create({
   },
 
   // Search
-  searchWrap: {
-    paddingHorizontal: Spacing.md,
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  searchBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: BorderRadius.lg,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderWidth: 1,
-  },
-
   // Last Read
   lastReadCard: {
     flexDirection: 'row',

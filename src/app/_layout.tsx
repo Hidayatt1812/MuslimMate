@@ -97,6 +97,7 @@ export default function RootLayout() {
           <Stack.Screen name="tahfidz/[planId]" options={{ headerShown: false }} />
           <Stack.Screen name="ai-chat" options={{ headerShown: false }} />
           <Stack.Screen name="quran-finder" options={{ headerShown: false }} />
+          <Stack.Screen name="quran-progress" options={{ headerShown: false }} />
           <Stack.Screen name="hijri-calendar" options={{ headerShown: false }} />
           <Stack.Screen name="login" options={{ headerShown: false, animation: 'slide_from_bottom' }} />
           <Stack.Screen name="modal" options={{ presentation: 'modal' }} />

@@ -25,8 +25,11 @@ import {
   getStreak,
   updateStreak,
   getLastRead,
+  getQuranReadingSummary,
   DailyTracker,
   StreakData,
+  type LastReadData,
+  type QuranReadingSummary,
 } from '@/services/storageService';
 import { fetchDailyVerse } from '@/services/quranService';
 import { fetchQFDailyVerse, isQFConfigured } from '@/services/quranFoundationService';
@@ -34,6 +37,17 @@ import { fetchQFDailyVerse, isQFConfigured } from '@/services/quranFoundationSer
 const PRAYERS_ORDERED = ['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha'] as const;
 const PRAYER_COLORS: Record<string, string> = {
   Fajr: '#6366F1', Dhuhr: '#EF4444', Asr: '#F97316', Maghrib: '#8B5CF6', Isha: '#1E40AF',
+};
+
+const formatReadingDuration = (seconds: number, lang: 'id' | 'en') => {
+  const minutes = Math.max(0, Math.round(seconds / 60));
+  if (minutes <= 0) return lang === 'id' ? 'baru mulai' : 'just started';
+  if (minutes < 60) return `${minutes} ${lang === 'id' ? 'menit' : 'min'}`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest > 0
+    ? `${hours}j ${rest}m`
+    : `${hours} ${lang === 'id' ? 'jam' : 'h'}`;
 };
 
 function PrayerDot({ name }: { name: string }) {
@@ -57,18 +71,21 @@ export default function DashboardScreen() {
   const [dailyVerse, setDailyVerse] = useState<{ arabic: string; translation: string; reference: string } | null>(null);
   const [countdown, setCountdown] = useState({ h: 0, m: 0 });
   const [refreshing, setRefreshing] = useState(false);
-  const [lastRead, setLastReadState] = useState<any>(null);
+  const [lastRead, setLastReadState] = useState<LastReadData | null>(null);
+  const [readingSummary, setReadingSummary] = useState<QuranReadingSummary | null>(null);
 
   const loadData = useCallback(async () => {
-    const [t, s, lr, verse] = await Promise.all([
+    const [t, s, lr, summary, verse] = await Promise.all([
       getTodayTracker(),
       getStreak(),
       getLastRead(),
+      getQuranReadingSummary(),
       isQFConfigured() ? fetchQFDailyVerse(lang).catch(() => fetchDailyVerse(lang)) : fetchDailyVerse(lang),
     ]);
     setTracker(t);
     setStreak(s);
     setLastReadState(lr);
+    setReadingSummary(summary);
     setDailyVerse(verse);
   }, [lang]);
 
@@ -282,6 +299,65 @@ export default function DashboardScreen() {
             </Card>
           )}
 
+          {/* Quran Reading Progress */}
+          {readingSummary && (
+            <TouchableOpacity
+              onPress={() => router.push('/quran-progress' as any)}
+              style={[styles.readingProgressCard, { backgroundColor: C.card, borderColor: C.border }]}
+              activeOpacity={0.84}
+            >
+              <View style={styles.readingProgressHeader}>
+                <View style={[styles.readingProgressIcon, { backgroundColor: `${C.gold}18` }]}>
+                  <Ionicons name="flame-outline" size={18} color={C.gold} />
+                </View>
+                <View style={{ flex: 1, marginLeft: 10 }}>
+                  <Text style={{ color: C.text, fontSize: 13, fontWeight: '800' }}>
+                    {t('quran_progress_title')}
+                  </Text>
+                  <Text style={{ color: C.textMuted, fontSize: 10, marginTop: 2 }} numberOfLines={1}>
+                    {readingSummary.today.lastSurahName
+                      ? `${t('today')}: ${readingSummary.today.lastSurahName} · ${t('verse_label')} ${readingSummary.today.lastAyah}`
+                      : t('quran_progress_no_activity')}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={C.textMuted} />
+              </View>
+
+              <View style={styles.readingProgressStatsRow}>
+                <View style={styles.readingProgressStat}>
+                  <Text style={{ color: C.gold, fontSize: 17, fontWeight: '900' }}>
+                    {readingSummary.streak.current}
+                  </Text>
+                  <Text style={{ color: C.textMuted, fontSize: 9, fontWeight: '700' }}>{t('quran_progress_streak')}</Text>
+                </View>
+                <View style={styles.readingProgressStat}>
+                  <Text style={{ color: C.primary, fontSize: 17, fontWeight: '900' }}>
+                    {formatReadingDuration(readingSummary.today.durationSeconds, lang)}
+                  </Text>
+                  <Text style={{ color: C.textMuted, fontSize: 9, fontWeight: '700' }}>{t('quran_progress_today')}</Text>
+                </View>
+                <View style={styles.readingProgressStat}>
+                  <Text style={{ color: '#8B5CF6', fontSize: 17, fontWeight: '900' }}>
+                    {readingSummary.weekly.activeDays}/{readingSummary.goal.weeklyDaysTarget}
+                  </Text>
+                  <Text style={{ color: C.textMuted, fontSize: 9, fontWeight: '700' }}>{t('quran_progress_week')}</Text>
+                </View>
+              </View>
+
+              <View style={[styles.readingProgressTrack, { backgroundColor: C.surface }]}>
+                <View
+                  style={[
+                    styles.readingProgressFill,
+                    {
+                      backgroundColor: C.primary,
+                      width: `${Math.round(readingSummary.weekly.dayProgress * 100)}%`,
+                    },
+                  ]}
+                />
+              </View>
+            </TouchableOpacity>
+          )}
+
           {/* Quick Actions */}
           <View>
             <Text style={{ color: C.text, fontSize: FontSize.md, fontWeight: '700', marginBottom: Spacing.sm }}>
@@ -447,6 +523,43 @@ const styles = StyleSheet.create({
     borderRadius: BorderRadius.md,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  readingProgressCard: {
+    padding: Spacing.md,
+    borderRadius: BorderRadius.lg,
+    borderWidth: 1,
+  },
+  readingProgressHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  readingProgressIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  readingProgressStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 12,
+  },
+  readingProgressStat: {
+    flex: 1,
+    minHeight: 48,
+    justifyContent: 'center',
+  },
+  readingProgressTrack: {
+    height: 7,
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginTop: 10,
+  },
+  readingProgressFill: {
+    height: '100%',
+    borderRadius: 4,
   },
   prayerRow: {
     flexDirection: 'row',
